@@ -8,7 +8,12 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.ParcelFileDescriptor
+import android.print.PageRange
 import android.print.PrintAttributes
+import android.print.PrintDocumentAdapter
+import android.print.PrintDocumentInfo
 import android.print.PrintManager
 import android.util.Base64
 import android.util.Log
@@ -51,6 +56,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import com.example.ui.theme.MyApplicationTheme
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 
 class MainActivity : ComponentActivity() {
@@ -382,21 +388,67 @@ class WebAppInterface(private val context: Context, private val webView: WebView
     }
 
     @JavascriptInterface
-    fun printPage() {
+    fun printPdf(base64Data: String, fileName: String, jobName: String) {
         try {
-            val printManager = context.getSystemService(Context.PRINT_SERVICE) as? PrintManager
-            if (printManager != null) {
-                val printAdapter = webView.createPrintDocumentAdapter("ArcDesign_Construction_Document")
-                val printAttributes = PrintAttributes.Builder()
-                    .setMediaSize(PrintAttributes.MediaSize.NA_LEGAL)
-                    .build()
-                printManager.print("ArcDesign_Construction_Document", printAdapter, printAttributes)
+            val cleanBase64 = if (base64Data.contains(",")) {
+                base64Data.substringAfter(",")
             } else {
-                showToast("Printing service unavailable on this device")
+                base64Data
+            }
+            val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+            val printDir = File(context.cacheDir, "print_jobs").apply {
+                if (!exists()) mkdirs()
+            }
+            val safeName = fileName.ifEmpty { "ArcDesign_Document.pdf" }
+            val targetFile = File(printDir, safeName)
+            FileOutputStream(targetFile).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+            }
+
+            webView.post {
+                try {
+                    val printManager = context.getSystemService(Context.PRINT_SERVICE) as? PrintManager
+                    if (printManager != null) {
+                        val printAttributes = PrintAttributes.Builder()
+                            .setMediaSize(PrintAttributes.MediaSize.NA_LEGAL.asLandscape())
+                            .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
+                            .build()
+                        val printJobName = jobName.ifEmpty { safeName }
+                        printManager.print(printJobName, PdfPrintDocumentAdapter(targetFile), printAttributes)
+                    } else {
+                        showToast("Printing service unavailable on this device")
+                    }
+                } catch (e: Exception) {
+                    Log.e("WebAppInterface", "Error starting print dialog", e)
+                    showToast("Print dialog error: ${e.message}")
+                }
             }
         } catch (e: Exception) {
-            Log.e("WebAppInterface", "Error printing", e)
-            showToast("Print error: ${e.message}")
+            Log.e("WebAppInterface", "Error preparing PDF for print", e)
+            showToast("Failed to prepare PDF: ${e.message}")
+        }
+    }
+
+    @JavascriptInterface
+    fun printPage() {
+        webView.post {
+            try {
+                val printManager = context.getSystemService(Context.PRINT_SERVICE) as? PrintManager
+                if (printManager != null) {
+                    val printAdapter = webView.createPrintDocumentAdapter("ArcDesign_Construction_Document")
+                    val printAttributes = PrintAttributes.Builder()
+                        .setMediaSize(PrintAttributes.MediaSize.NA_LEGAL.asLandscape())
+                        .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
+                        .build()
+                    printManager.print("ArcDesign_Construction_Document", printAdapter, printAttributes)
+                } else {
+                    showToast("Printing service unavailable on this device")
+                }
+            } catch (e: Exception) {
+                Log.e("WebAppInterface", "Error printing", e)
+                showToast("Print error: ${e.message}")
+            }
         }
     }
 
@@ -419,3 +471,43 @@ class WebAppInterface(private val context: Context, private val webView: WebView
         }
     }
 }
+
+class PdfPrintDocumentAdapter(private val file: File) : PrintDocumentAdapter() {
+    override fun onLayout(
+        oldAttributes: PrintAttributes?,
+        newAttributes: PrintAttributes,
+        cancellationSignal: CancellationSignal?,
+        callback: LayoutResultCallback,
+        extras: Bundle?
+    ) {
+        if (cancellationSignal?.isCanceled == true) {
+            callback.onLayoutCancelled()
+            return
+        }
+        val info = PrintDocumentInfo.Builder(file.name)
+            .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+            .setPageCount(PrintDocumentInfo.PAGE_COUNT_UNKNOWN)
+            .build()
+        callback.onLayoutFinished(info, true)
+    }
+
+    override fun onWrite(
+        pages: Array<out PageRange>?,
+        destination: ParcelFileDescriptor,
+        cancellationSignal: CancellationSignal?,
+        callback: WriteResultCallback
+    ) {
+        try {
+            FileInputStream(file).use { input ->
+                FileOutputStream(destination.fileDescriptor).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            callback.onWriteFinished(arrayOf(PageRange.ALL_PAGES))
+        } catch (e: Exception) {
+            Log.e("PdfPrintAdapter", "Error writing PDF to print output", e)
+            callback.onWriteFailed(e.message)
+        }
+    }
+}
+

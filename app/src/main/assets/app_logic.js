@@ -266,6 +266,45 @@ function getCurrentUser() {
   }; 
 } 
 
+function reloadStoreFromDisk() {
+  try {
+    const raw = safeStorageGet(STORAGE_KEY);
+    const rawPayroll = safeStorageGet(PAYROLL_STORAGE_KEY);
+    if (rawPayroll) {
+      try { payrollDB = JSON.parse(rawPayroll); } catch(e) { payrollDB = {}; }
+    }
+    if (raw) {
+      try { timesheetDB = JSON.parse(raw); } catch(e) { timesheetDB = {}; }
+    }
+    if (!timesheetDB[currentDate]) {
+      const today = getTodayFormatted();
+      if (timesheetDB[today]) {
+        currentDate = today;
+      } else {
+        const remaining = Object.keys(timesheetDB).filter(k => checkHasRecordForDate(k));
+        if (remaining.length > 0) currentDate = remaining.sort().reverse()[0];
+      }
+    }
+    if (timesheetDB[currentDate]) {
+      currentActiveData = timesheetDB[currentDate];
+    }
+  } catch(e) {
+    console.error("Error reloading store from disk:", e);
+  }
+}
+
+// Automatic synchronization between Admin and Staff accounts / active tabs
+if (typeof window !== "undefined") {
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY || e.key === PAYROLL_STORAGE_KEY || e.key === DELETED_DATES_STORAGE_KEY || e.key === DELETED_SITES_STORAGE_KEY || e.key === DELETED_WORKERS_STORAGE_KEY) {
+      reloadStoreFromDisk();
+      renderLocationDropdown();
+      renderRecordedDatesList();
+      renderUI();
+    }
+  });
+} 
+
 function checkAuth() { 
   const sessionAuth = safeSessionGet("arcdesign_logged_in"); 
   const sessionRole = safeSessionGet("arcdesign_user_role"); 
@@ -364,6 +403,7 @@ window.attemptLogin = function(isAutomatic = false) {
       const overlay = document.getElementById("loginOverlay"); 
       if (overlay) overlay.style.display = "none"; 
 
+      reloadStoreFromDisk();
       updateAccountFooterDisplay(); 
       if (currentActiveData) renderUI(); 
       checkShowFeatureIntro(); 
@@ -403,6 +443,7 @@ function logoutSession() {
 function updateAccountFooterDisplay() { 
   const footerBadge = document.getElementById("activeAccountDisplay"); 
   const btnCreate = document.getElementById("btnCreateAccount"); 
+  const btnAddWorker = document.getElementById("btnAddWorkerBtn");
   const isAdm = isAdmin(); 
   const currUser = getCurrentUser(); 
 
@@ -414,6 +455,10 @@ function updateAccountFooterDisplay() {
   if (btnCreate) { 
     btnCreate.style.display = isAdm ? "inline-block" : "none"; 
   } 
+
+  if (btnAddWorker) {
+    btnAddWorker.style.display = isAdm ? "inline-block" : "none";
+  }
 } 
 
 // --- DATE CALCULATION & WEEK MANAGEMENT ---
@@ -564,16 +609,24 @@ function getAttendanceClass(val) {
   return ''; 
 } 
 
-function getWorkerAutomatedRemarks(worker) { 
+function getWorkerAutomatedRemarks(worker, customDates) { 
   const remarks = []; 
   let absentCount = 0; 
+  let sickCount = 0;
+  let emergencyCount = 0;
+  let fullDaysCount = 0;
+  let halfDaysCount = 0;
   let lateHours = 0; 
 
-  const dates = getCalculatedDates();
+  const dates = (customDates && customDates.length > 0) ? customDates : getCalculatedDates();
   dates.forEach(d => {
     const val = getWorkerAttendanceVal(worker, d);
-    if (val === 'absent' || val === 'sick' || val === 'emergency') absentCount++; 
-    if (typeof val === 'string' && val.endsWith('h')) {
+    if (val === '1.0' || val === '1') fullDaysCount++;
+    else if (val === '0.5') halfDaysCount++;
+    else if (val === 'absent') absentCount++; 
+    else if (val === 'sick') { absentCount++; sickCount++; }
+    else if (val === 'emergency') { absentCount++; emergencyCount++; }
+    else if (typeof val === 'string' && val.endsWith('h')) {
       const h = parseHourlyValue(val);
       if (h < 8) lateHours += (8 - h);
     }
@@ -581,18 +634,50 @@ function getWorkerAutomatedRemarks(worker) {
 
   const metrics = getWorkerMetrics(worker); 
 
+  // Attendance automated non-editable system remarks
   if (absentCount >= 3) { 
-    remarks.push({ type: 'danger', text: '⚠️ High Absence' }); 
+    remarks.push({ type: 'danger', text: `⚠️ High Absences (${absentCount} Days)`, bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' }); 
+  } else if (absentCount > 0) {
+    remarks.push({ type: 'warning text-dark', text: `⚠️ ${absentCount} Day${absentCount > 1 ? 's' : ''} Absent`, bg: '#fef3c7', color: '#92400e', border: '#fcd34d' });
+  }
+
+  if (sickCount > 0) {
+    remarks.push({ type: 'warning text-dark', text: `🩹 Sick Leave (${sickCount}d)`, bg: '#fef3c7', color: '#b45309', border: '#fde68a' });
+  }
+  if (emergencyCount > 0) {
+    remarks.push({ type: 'danger', text: `🚨 Emergency (${emergencyCount}d)`, bg: '#fee2e2', color: '#b91c1c', border: '#fca5a5' });
+  }
+
+  if (metrics.daysWorked >= 6 || fullDaysCount >= 6) { 
+    remarks.push({ type: 'success', text: '⭐ Perfect Attendance (6/6)', bg: '#dcfce7', color: '#166534', border: '#86efac' }); 
+  } else if (metrics.daysWorked >= 5 && absentCount === 0) {
+    remarks.push({ type: 'primary', text: `✓ Consistent Attendance (${metrics.daysWorked.toFixed(1)}d)`, bg: '#dbeafe', color: '#1e40af', border: '#93c5fd' });
+  } else if (metrics.daysWorked > 0 && metrics.daysWorked < 3 && absentCount === 0) {
+    remarks.push({ type: 'secondary', text: `⏳ Partial Week (${metrics.daysWorked.toFixed(1)}d)`, bg: '#f4f4f5', color: '#3f3f46', border: '#d4d4d8' });
+  }
+
+  if (metrics.totalOT >= 8) { 
+    remarks.push({ type: 'warning text-dark', text: `🔥 Heavy OT (${metrics.totalOT} hrs)`, bg: '#ffedd5', color: '#9a3412', border: '#fdba74' }); 
+  } else if (metrics.totalOT > 0) {
+    remarks.push({ type: 'info text-dark', text: `⚡ OT Logged (+${metrics.totalOT}h)`, bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' });
+  }
+
+  if (lateHours > 0) {
+    remarks.push({ type: 'secondary', text: `⏱️ Undertime (-${lateHours}h)`, bg: '#fef2f2', color: '#991b1b', border: '#fecaca' });
+  }
+
+  if ((worker.baleValue || 0) > 0) { 
+    remarks.push({ type: 'danger', text: `💳 Active Bale: ₱${Number(worker.baleValue).toLocaleString()}`, bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' }); 
   } 
-  if (metrics.totalOT >= 12) { 
-    remarks.push({ type: 'warning text-dark', text: '🔥 Heavy OT' }); 
-  } 
-  if (metrics.daysWorked >= 6) { 
-    remarks.push({ type: 'success', text: '⭐ Perfect Week' }); 
-  } 
-  if ((worker.baleValue || 0) > 1500) { 
-    remarks.push({ type: 'info text-dark', text: '💳 High Bale' }); 
-  } 
+
+  if (remarks.length === 0) {
+    if (metrics.daysWorked > 0) {
+      remarks.push({ type: 'success', text: '✓ Normal Operations', bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' });
+    } else {
+      remarks.push({ type: 'secondary', text: '⚪ Inactive / No Shifts', bg: '#f4f4f5', color: '#71717a', border: '#e4e4e7' });
+    }
+  }
+
   return remarks; 
 } 
 
@@ -907,11 +992,9 @@ function renderLocationHeaderControls() {
         <button class="btn btn-outline-dark btn-sm fw-bold" onclick="promptClearRecords()">
           <i class="bi bi-arrow-counterclockwise text-danger me-1"></i>Clear Site Records
         </button>
-        ${isAdm ? `
-          <button class="btn btn-outline-secondary btn-sm fw-bold" onclick="promptDeleteRecordedDate()">
-            <i class="bi bi-calendar-x text-danger me-1"></i>Delete Period
-          </button>
-        ` : ''}
+        <button class="btn btn-outline-secondary btn-sm fw-bold" onclick="promptDeleteRecordedDate()">
+          <i class="bi bi-calendar-x text-danger me-1"></i>Delete Period
+        </button>
       </div>
     `;
   }
@@ -1757,9 +1840,11 @@ function renderSingleLocationHTML(loc, dates, isAdm) {
         <td class="align-middle fw-bold worker-name-cell"> 
           <div class="d-flex align-items-center justify-content-between"> 
             <div class="d-flex align-items-center gap-1 text-truncate">
-              <button class="btn btn-sm btn-outline-primary p-0 px-1 no-print" onclick="openRenameWorkerModal('${w.id}')" title="Rename worker / Change role">
-                <i class="bi bi-pencil-fill" style="font-size: 0.72rem;"></i>
-              </button>
+              ${isAdm ? `
+                <button class="btn btn-sm btn-outline-primary p-0 px-1 no-print" onclick="openRenameWorkerModal('${w.id}')" title="Rename worker / Change role">
+                  <i class="bi bi-pencil-fill" style="font-size: 0.72rem;"></i>
+                </button>
+              ` : ''}
               <span class="text-uppercase text-nowrap cursor-pointer" style="word-spacing: 4px; cursor: pointer;" onclick="openWorkerProfileModal('${w.id}', '${(w.name || '').replace(/'/g, "\\'")}')" title="Click to view Worker Analytics & Remarks">${safeWorkerName}</span> 
             </div>
             <div class="d-flex align-items-center gap-1 no-print"> 
@@ -1844,9 +1929,11 @@ function renderSingleLocationHTML(loc, dates, isAdm) {
           <button class="btn ${isDone ? 'btn-outline-secondary' : 'btn-success'} btn-sm fw-bold" onclick="toggleSiteStatus('${loc}')"> 
             <i class="bi ${isDone ? 'bi-arrow-counterclockwise' : 'bi-check2-all'} me-1"></i>${isDone ? 'Reopen Site' : 'Mark as Done'} 
           </button> 
-          <button class="btn btn-outline-dark btn-sm fw-bold" onclick="showAddWorkerModal('${loc}')"> 
-            <i class="bi bi-person-plus-fill me-1 text-danger"></i>Add Worker 
-          </button> 
+          ${isAdm ? `
+            <button class="btn btn-outline-dark btn-sm fw-bold" onclick="showAddWorkerModal('${loc}')"> 
+              <i class="bi bi-person-plus-fill me-1 text-danger"></i>Add Worker 
+            </button> 
+          ` : ''}
           ${isAdm ? ` 
             <button class="btn btn-outline-danger btn-sm fw-bold" onclick="promptDeleteSite('${loc}')"> 
               <i class="bi bi-trash-fill me-1"></i>Delete Site 
@@ -1934,10 +2021,27 @@ function renderSingleLocationHTML(loc, dates, isAdm) {
         </div> 
         <div class="d-flex align-items-center gap-3"> 
           <div class="d-flex align-items-center gap-2"> 
-            <label class="fw-bold small text-dark mb-0">Project Bale (₱):</label> 
-            <input type="number" step="any" class="form-control form-control-sm text-end fw-bold" style="width: 110px;" 
-                   value="${locData.baleValue || ''}" placeholder="0" 
-                   onchange="updateLocationBale(this.value)"> 
+            <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+              <input class="form-check-input border-danger" type="checkbox" id="siteBaleSwitch_${loc}" 
+                     ${locData.isBaleEnabled !== false ? 'checked' : ''} 
+                     onchange="toggleLocationBaleEnabled('${loc}', this.checked)">
+              <label class="form-check-label small fw-bold text-dark user-select-none mb-0" for="siteBaleSwitch_${loc}">
+                Project Bale: 
+                <span class="badge ${locData.isBaleEnabled !== false ? 'bg-success' : 'bg-secondary'}" style="font-size: 0.7rem;">
+                  ${locData.isBaleEnabled !== false ? 'ON' : 'OFF'}
+                </span>
+              </label>
+            </div>
+            ${locData.isBaleEnabled !== false ? `
+              <div class="input-group input-group-sm" style="width: 120px;">
+                <span class="input-group-text fw-bold bg-light p-1">₱</span>
+                <input type="number" step="any" class="form-control form-control-sm text-end fw-bold" 
+                       value="${locData.baleValue || ''}" placeholder="0" 
+                       onchange="updateLocationBaleForSite('${loc}', this.value)"> 
+              </div>
+            ` : `
+              <span class="text-muted small fst-italic">(Turned OFF)</span>
+            `}
           </div> 
         </div> 
       </div> 
@@ -2006,6 +2110,24 @@ function updateLocationBale(value) {
     saveStore(); 
     renderUI(); 
   } 
+} 
+
+function updateLocationBaleForSite(loc, value) {
+  const targetLoc = loc || currentLocation;
+  if (currentActiveData.locations[targetLoc]) {
+    currentActiveData.locations[targetLoc].baleValue = parseFloat(value) || 0;
+    saveStore();
+    renderUI();
+  }
+}
+
+function toggleLocationBaleEnabled(loc, isEnabled) {
+  const targetLoc = loc || currentLocation;
+  if (currentActiveData.locations[targetLoc]) {
+    currentActiveData.locations[targetLoc].isBaleEnabled = !!isEnabled;
+    saveStore();
+    renderUI();
+  }
 } 
 
 function toggleSiteStatus(loc) { 
@@ -2603,6 +2725,11 @@ function selectSearchedWorker(loc, workerId) {
 
 // --- ADD WORKER MODAL ---
 function showAddWorkerModal(loc = null) {
+  if (!isAdmin()) {
+    alert("Staff accounts cannot add workers. Administrator authorization required.");
+    return;
+  }
+
   const targetLoc = loc || (currentLocation === "VIEW_ALL" ? Object.keys(currentActiveData.locations)[0] : currentLocation);
   if (!targetLoc) {
     alert("Please create a site first before adding workers.");
@@ -2622,6 +2749,11 @@ function showAddWorkerModal(loc = null) {
 }
 
 function confirmAddWorker() {
+  if (!isAdmin()) {
+    alert("Staff accounts cannot add workers. Administrator authorization required.");
+    return;
+  }
+
   const targetLoc = document.getElementById("modalLocName")?.innerText || currentLocation;
   const nameInput = document.getElementById("newWorkerName");
   const roleSelect = document.getElementById("newWorkerRole");
@@ -3194,6 +3326,11 @@ function appendModalSiteNotePreset(presetText) {
 
 // --- RENAME WORKER MODAL ---
 function openRenameWorkerModal(workerId) {
+  if (!isAdmin()) {
+    alert("Staff accounts cannot rename workers or change worker roles. Administrator authorization required.");
+    return;
+  }
+
   activeWorkerForRename = workerId;
   let targetWorker = null;
 
@@ -3217,6 +3354,11 @@ function openRenameWorkerModal(workerId) {
 }
 
 function confirmRenameWorker() {
+  if (!isAdmin()) {
+    alert("Staff accounts cannot rename workers or change worker roles. Administrator authorization required.");
+    return;
+  }
+
   if (!activeWorkerForRename) return;
   const name = (document.getElementById("renameWorkerNameInput")?.value || "").trim().toUpperCase();
   const role = document.getElementById("renameWorkerRoleInput")?.value || "LABOR";
@@ -3338,6 +3480,10 @@ function confirmCreateStaffAccount() {
 }
 
 function deleteStaffAccount(idx) {
+  if (!isAdmin()) {
+    alert("Administrator authorization required to delete staff accounts.");
+    return;
+  }
   if (confirm("Permanently delete this staff account?")) {
     const accounts = getStaffAccounts();
     accounts.splice(idx, 1);
@@ -3362,6 +3508,11 @@ function showCreateProjectModal() {
 }
 
 function confirmCreateProject() {
+  if (!isAdmin()) {
+    alert("Staff accounts cannot create project sites. Administrator authorization required.");
+    return;
+  }
+
   const inputEl = document.getElementById("newProjectName");
   const name = (inputEl?.value || "").trim().toUpperCase();
 
@@ -3444,9 +3595,50 @@ function saveWorkerHourlyRate(loc, workerId, rate) {
   safeStorageSet(PAYROLL_STORAGE_KEY, JSON.stringify(payrollDB));
 }
 
+let isProjectBaleDeducted = true;
+let payrollProjectBaleOverride = null;
+
+function getActiveProjectBaleValue() {
+  if (payrollProjectBaleOverride !== null) {
+    return payrollProjectBaleOverride;
+  }
+  if (currentLocation === "VIEW_ALL") {
+    const delSites = getDeletedSites();
+    const sites = Object.keys(currentActiveData.locations || {}).filter(s => !delSites.includes(s.toUpperCase()));
+    return sites.reduce((sum, s) => {
+      const locObj = currentActiveData.locations[s];
+      if (!locObj || locObj.isBaleEnabled === false) return sum;
+      return sum + (locObj.baleValue || 0);
+    }, 0);
+  } else {
+    const locObj = currentActiveData.locations[currentLocation];
+    if (!locObj || locObj.isBaleEnabled === false) return 0;
+    return locObj.baleValue || 0;
+  }
+}
+
+function toggleProjectBaleDeduction(isChecked) {
+  isProjectBaleDeducted = !!isChecked;
+  const toggleEl = document.getElementById("payrollProjectBaleToggle");
+  if (toggleEl) toggleEl.checked = isProjectBaleDeducted;
+  renderPayrollTable();
+}
+
+function onPayrollManualBaleInput(val) {
+  const num = parseFloat(val);
+  payrollProjectBaleOverride = isNaN(num) ? 0 : num;
+  if (currentLocation !== "VIEW_ALL" && currentActiveData.locations[currentLocation]) {
+    currentActiveData.locations[currentLocation].baleValue = payrollProjectBaleOverride;
+    saveStore();
+  }
+  renderPayrollTable();
+}
+
 function openDailyWagePayrollModal() {
   const modalEl = document.getElementById("dailyWagePayrollModal");
   if (!modalEl || !window.bootstrap) return;
+
+  payrollProjectBaleOverride = null;
 
   const locBadge = document.getElementById("payrollLocationBadge");
   if (locBadge) locBadge.innerText = currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation;
@@ -3455,6 +3647,9 @@ function openDailyWagePayrollModal() {
   const dateRangeStr = getPeriodString(dates);
   const periodBadge = document.getElementById("payrollPeriodBadge");
   if (periodBadge) periodBadge.innerText = dateRangeStr;
+
+  const toggleEl = document.getElementById("payrollProjectBaleToggle");
+  if (toggleEl) toggleEl.checked = isProjectBaleDeducted;
 
   renderPayrollTable();
   bootstrap.Modal.getOrCreateInstance(modalEl).show();
@@ -3474,9 +3669,7 @@ function renderPayrollTable() {
   let totalHourlyHours = 0;
   let totalOTHours = 0;
   let totalOTPay = 0;
-  let totalAmountPaid = 0;
   let totalSubtotal = 0;
-  let totalBale = 0;
 
   let rowsHtml = '';
 
@@ -3509,16 +3702,13 @@ function renderPayrollTable() {
       const hourlyPay = m.hourlyHours * hourlyRate;
       const otPay = m.totalOT * otHourlyRate;
       const gross = regularDaysPay + hourlyPay + otPay;
-      const baleDeduction = parseFloat(w.baleValue) || 0;
-      const net = Math.max(0, gross - baleDeduction);
+      const net = gross;
 
       totalDays += m.daysWorked;
       totalHourlyHours += m.hourlyHours;
       totalOTHours += m.totalOT;
       totalOTPay += otPay;
       totalSubtotal += gross;
-      totalBale += baleDeduction;
-      totalAmountPaid += net;
 
       const safePayrollWorkerName = (w.name || '').replace(/ /g, '&nbsp;');
 
@@ -3527,9 +3717,11 @@ function renderPayrollTable() {
           <td class="text-start ps-2 fw-bold text-uppercase text-nowrap">
             <div class="d-flex align-items-center justify-content-between gap-1">
               <span>${safePayrollWorkerName}</span>
-              <button class="btn btn-sm btn-outline-primary p-0 px-1 no-print" onclick="openRenameWorkerModal('${w.id}')" title="Rename worker or change role">
-                <i class="bi bi-pencil-fill" style="font-size: 0.7rem;"></i>
-              </button>
+              ${isAdmin() ? `
+                <button class="btn btn-sm btn-outline-primary p-0 px-1 no-print" onclick="openRenameWorkerModal('${w.id}')" title="Rename worker or change role">
+                  <i class="bi bi-pencil-fill" style="font-size: 0.7rem;"></i>
+                </button>
+              ` : ''}
             </div>
           </td>
           <td class="text-center fw-bold text-muted small">${w.role}</td>
@@ -3557,27 +3749,68 @@ function renderPayrollTable() {
                    oninput="updateWorkerRemarks('${w.id}', this.value)"
                    onchange="updateWorkerRemarks('${w.id}', this.value)"
                    style="font-size: 0.78rem; min-width: 110px;">
-            ${baleDeduction > 0 ? `<small class="text-danger fw-bold d-block mt-1">Bale: -₱${baleDeduction}</small>` : ''}
           </td>
         </tr>
       `;
     });
   });
 
+  const totalAmount = totalSubtotal;
+  const siteBale = getActiveProjectBaleValue();
+  const finalTotal = Math.max(0, totalAmount - (isProjectBaleDeducted ? siteBale : 0));
+
   tbody.innerHTML = rowsHtml || `<tr><td colspan="11" class="p-3 text-muted">No workers found.</td></tr>`;
 
   tfoot.innerHTML = `
-    <tr class="table-dark fw-bold" style="border-top: 2px solid #d11a2a;">
-      <td colspan="2" class="text-end text-white">PAYROLL TOTALS:</td>
-      <td class="text-center text-white">${totalDays.toFixed(1)}</td>
-      <td class="text-center text-white">${totalHourlyHours}h</td>
-      <td class="text-center text-warning">${totalOTHours}h</td>
-      <td colspan="2" class="text-muted small">Subtotal: ₱${totalSubtotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} | Bale: -₱${totalBale.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-      <td class="text-end text-warning pe-2">₱${totalOTPay.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-      <td class="text-end text-white pe-2 fs-6" style="background-color: #d11a2a !important;">₱${totalAmountPaid.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-      <td colspan="2" class="text-muted small">Net Disbursement</td>
+    <tr class="table-light fw-bold" style="border-top: 2px solid #3f3f46;">
+      <td colspan="2" class="text-end text-dark">WAGES SUB-TOTAL:</td>
+      <td class="text-center text-dark">${totalDays.toFixed(1)}d</td>
+      <td class="text-center text-dark">${totalHourlyHours}h</td>
+      <td class="text-center text-danger">${totalOTHours}h</td>
+      <td colspan="2" class="text-muted small">Daily & Hourly Base: ₱${(totalSubtotal - totalOTPay).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+      <td class="text-end text-danger pe-2">₱${totalOTPay.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+      <td class="text-end fw-bold text-dark pe-2">₱${totalAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+      <td colspan="2"></td>
+    </tr>
+    <tr class="table-secondary fw-bold" style="font-size: 0.95rem;">
+      <td colspan="7" class="text-end text-dark">TOTAL AMOUNT:</td>
+      <td colspan="2" class="text-end pe-2 fw-bold text-dark fs-6">₱${totalAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+      <td colspan="2" class="small text-muted">Total Worker Wages</td>
+    </tr>
+    <tr class="table-warning fw-bold" style="font-size: 0.95rem;">
+      <td colspan="7" class="text-end text-danger">BALE AMOUNT (${isProjectBaleDeducted ? 'DEDUCTED' : 'EXCLUDED'}):</td>
+      <td colspan="2" class="text-end pe-2 text-danger fs-6">${isProjectBaleDeducted ? `-₱${siteBale.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : '₱0.00 (Toggled OFF)'}</td>
+      <td colspan="2" class="small text-muted">${currentLocation === 'VIEW_ALL' ? 'All Sites Bale' : 'Site Bale Value'}</td>
+    </tr>
+    <tr class="table-dark fw-bold" style="border-top: 2px solid #d11a2a; font-size: 1.05rem;">
+      <td colspan="7" class="text-end text-white">TOTAL:</td>
+      <td colspan="2" class="text-end text-white pe-2 fs-5" style="background-color: #d11a2a !important;">₱${finalTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+      <td colspan="2" class="small text-white-50">Final Net Payout</td>
     </tr>
   `;
+
+  // Synchronize bottom Project Bale card
+  const displayTotalEl = document.getElementById("payrollCardTotalAmount");
+  const displayFinalEl = document.getElementById("payrollCardFinalTotal");
+  const baleInputEl = document.getElementById("payrollProjectBaleInput");
+  const toggleBadge = document.getElementById("payrollProjectBaleToggleBadge");
+  const baleDeductionLabel = document.getElementById("payrollBaleDeductionLabel");
+
+  if (displayTotalEl) displayTotalEl.innerText = `₱${totalAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (displayFinalEl) displayFinalEl.innerText = `₱${finalTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+  if (baleInputEl && document.activeElement !== baleInputEl) {
+    baleInputEl.value = siteBale;
+  }
+  if (toggleBadge) {
+    toggleBadge.className = isProjectBaleDeducted ? 'badge bg-success' : 'badge bg-secondary';
+    toggleBadge.innerText = isProjectBaleDeducted ? 'ON (Deducted)' : 'OFF (Excluded)';
+  }
+  if (baleDeductionLabel) {
+    baleDeductionLabel.innerText = isProjectBaleDeducted 
+      ? `Deducted from Total Amount (-₱${siteBale.toLocaleString('en-US', {minimumFractionDigits: 2})})`
+      : `Project Bale toggle is OFF (Not deducted)`;
+    baleDeductionLabel.className = isProjectBaleDeducted ? 'text-danger d-block mt-1 fw-semibold' : 'text-muted d-block mt-1';
+  }
 }
 
 function onQuickRoleChange(role) {
@@ -3646,13 +3879,39 @@ function hideProcessingIndicator() {
   if (el) el.style.display = "none";
 }
 
+// --- STANDARD FILE NAMING HELPER ---
+function getStandardExportFileName(reportTag = "", extension = "pdf", customLocation = null, customDates = null) {
+  const dates = (customDates && customDates.length > 0) ? customDates : getCalculatedDates();
+  let periodStr = "";
+  if (dates && dates.length > 0) {
+    const first = dates[0];
+    const last = dates[dates.length - 1];
+    if (first.monthStr === last.monthStr) {
+      periodStr = `${first.monthStr} ${first.dayNum}-${last.dayNum}`;
+    } else {
+      periodStr = `${first.monthStr} ${first.dayNum}-${last.monthStr} ${last.dayNum}`;
+    }
+  } else {
+    periodStr = currentDate;
+  }
+
+  const effectiveLoc = customLocation 
+    ? (customLocation === "VIEW_ALL" || customLocation === "ALL" ? "All Sites" : customLocation) 
+    : (currentLocation === "VIEW_ALL" ? "All Sites" : currentLocation);
+
+  // User spec: "COMPANY NAME LOCATION AND DATE PERIOD start date and end date example Aug 15-21"
+  return `ArcDesign ${effectiveLoc} ${periodStr}.${extension}`.replace(/[/\\?%*:|"<>]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 async function exportPayroll(destination) {
   await exportPayrollPdfLandscape(destination);
 }
 
 // --- MULTI-PAGE PDF RENDERER HELPER ---
 async function renderPdfFromHtmlElement(tempContainer, fileName, destination, title, message) {
-  document.body.appendChild(tempContainer);
+  if (!tempContainer.parentNode) {
+    document.body.appendChild(tempContainer);
+  }
 
   try {
     if (typeof window.jspdf === 'undefined') {
@@ -3660,7 +3919,7 @@ async function renderPdfFromHtmlElement(tempContainer, fileName, destination, ti
       return;
     }
 
-    updateProcessingStatus("Rendering high-resolution document pages...", 50);
+    updateProcessingStatus("Rendering high-resolution document pages...", 40);
 
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({
@@ -3669,88 +3928,105 @@ async function renderPdfFromHtmlElement(tempContainer, fileName, destination, ti
       format: 'legal'
     });
 
-    const canvas = await html2canvas(tempContainer, { scale: 1.6, useCORS: true, logging: false });
-    updateProcessingStatus("Calculating page breaks and layout...", 75);
-
-    const W = canvas.width;
-    const H = canvas.height;
     const pdfUsableWidth = 13.0;
-    const pdfUsableHeight = 7.4;
-    const pxPerInch = W / pdfUsableWidth;
-    const maxSliceH = Math.floor(pdfUsableHeight * pxPerInch);
+    const pdfUsableHeight = 7.45;
 
-    if (H <= maxSliceH) {
-      // Content fits comfortably on one page
-      const sliceHInInches = H / pxPerInch;
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
-      pdf.addImage(imgData, 'JPEG', 0.5, 0.5, pdfUsableWidth, sliceHInInches);
-      pdf.setFontSize(8);
-      pdf.setTextColor(140, 140, 140);
-      pdf.text(`ARCDESIGN Official Statement - ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation} - Page 1 of 1`, 0.5, 8.1);
-    } else {
-      // Content spans multiple pages - perform clean multi-page slicing
-      let currentY = 0;
-      let pageNum = 0;
-      const ctx = canvas.getContext('2d');
+    const pageBlocks = tempContainer.querySelectorAll('.arc-pdf-page');
 
-      while (currentY < H) {
-        if (pageNum > 0) {
+    if (pageBlocks && pageBlocks.length > 0) {
+      // Chunked multi-page rendering: each page block is rendered independently so NO rows or names are cut
+      for (let i = 0; i < pageBlocks.length; i++) {
+        if (i > 0) {
           pdf.addPage();
         }
+        updateProcessingStatus(`Rendering document page ${i + 1} of ${pageBlocks.length}...`, Math.round(45 + (i / pageBlocks.length) * 40));
+        const pageBlock = pageBlocks[i];
+        const pageCanvas = await html2canvas(pageBlock, { scale: 1.6, useCORS: true, logging: false });
+        const imgData = pageCanvas.toDataURL('image/jpeg', 0.95);
+        const pageHInInches = Math.min(pdfUsableHeight, (pageCanvas.height / pageCanvas.width) * pdfUsableWidth);
+        pdf.addImage(imgData, 'JPEG', 0.5, 0.45, pdfUsableWidth, pageHInInches);
+        pdf.setFontSize(8);
+        pdf.setTextColor(140, 140, 140);
+        pdf.text(`ARCDESIGN Official Statement - ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation} - Page ${i + 1} of ${pageBlocks.length}`, 0.5, 8.15);
+      }
+    } else {
+      // Single continuous element rendering
+      const canvas = await html2canvas(tempContainer, { scale: 1.6, useCORS: true, logging: false });
+      updateProcessingStatus("Calculating layout...", 75);
 
-        let sliceH = Math.min(maxSliceH, H - currentY);
+      const W = canvas.width;
+      const H = canvas.height;
+      const pxPerInch = W / pdfUsableWidth;
+      const maxSliceH = Math.floor(pdfUsableHeight * pxPerInch);
 
-        // Search for a white/light row boundary to avoid cutting text across pages
-        if (currentY + sliceH < H) {
-          const searchStartY = Math.floor(currentY + sliceH);
-          const searchMinY = Math.max(searchStartY - 90, currentY + 120);
-          let bestY = searchStartY;
+      if (H <= maxSliceH) {
+        const sliceHInInches = H / pxPerInch;
+        const imgData = canvas.toDataURL('image/jpeg', 0.95);
+        pdf.addImage(imgData, 'JPEG', 0.5, 0.5, pdfUsableWidth, sliceHInInches);
+        pdf.setFontSize(8);
+        pdf.setTextColor(140, 140, 140);
+        pdf.text(`ARCDESIGN Official Statement - ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation} - Page 1 of 1`, 0.5, 8.1);
+      } else {
+        let currentY = 0;
+        let pageNum = 0;
+        const ctx = canvas.getContext('2d');
 
-          for (let y = searchStartY; y >= searchMinY; y -= 2) {
-            let isGap = true;
-            for (let x = 60; x < W - 60; x += Math.floor(W / 18)) {
-              const px = ctx.getImageData(x, y, 1, 1).data;
-              if (px[0] < 235 || px[1] < 235 || px[2] < 235) {
-                isGap = false;
+        while (currentY < H) {
+          if (pageNum > 0) {
+            pdf.addPage();
+          }
+          let sliceH = Math.min(maxSliceH, H - currentY);
+          if (currentY + sliceH < H) {
+            const searchStartY = Math.floor(currentY + sliceH);
+            const searchMinY = Math.max(searchStartY - 160, currentY + 80);
+            let bestY = searchStartY;
+
+            for (let y = searchStartY; y >= searchMinY; y -= 2) {
+              let isGap = true;
+              for (let x = 60; x < W - 60; x += Math.floor(W / 18)) {
+                const px = ctx.getImageData(x, y, 1, 1).data;
+                if (px[0] < 230 || px[1] < 230 || px[2] < 230) {
+                  isGap = false;
+                  break;
+                }
+              }
+              if (isGap) {
+                bestY = y;
                 break;
               }
             }
-            if (isGap) {
-              bestY = y;
-              break;
-            }
+            sliceH = bestY - currentY;
           }
-          sliceH = bestY - currentY;
+
+          const sliceCanvas = document.createElement('canvas');
+          sliceCanvas.width = W;
+          sliceCanvas.height = sliceH;
+          const sliceCtx = sliceCanvas.getContext('2d');
+          sliceCtx.fillStyle = '#ffffff';
+          sliceCtx.fillRect(0, 0, W, sliceH);
+          sliceCtx.drawImage(canvas, 0, currentY, W, sliceH, 0, 0, W, sliceH);
+
+          const sliceData = sliceCanvas.toDataURL('image/jpeg', 0.95);
+          const pdfSliceH = sliceH / pxPerInch;
+          pdf.addImage(sliceData, 'JPEG', 0.5, 0.5, pdfUsableWidth, pdfSliceH);
+
+          pdf.setFontSize(8);
+          pdf.setTextColor(140, 140, 140);
+          pdf.text(`ARCDESIGN Official Statement - ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation} - Page ${pageNum + 1}`, 0.5, 8.1);
+
+          currentY += sliceH;
+          pageNum++;
         }
-
-        const sliceCanvas = document.createElement('canvas');
-        sliceCanvas.width = W;
-        sliceCanvas.height = sliceH;
-        const sliceCtx = sliceCanvas.getContext('2d');
-        sliceCtx.fillStyle = '#ffffff';
-        sliceCtx.fillRect(0, 0, W, sliceH);
-        sliceCtx.drawImage(canvas, 0, currentY, W, sliceH, 0, 0, W, sliceH);
-
-        const sliceData = sliceCanvas.toDataURL('image/jpeg', 0.95);
-        const pdfSliceH = sliceH / pxPerInch;
-        pdf.addImage(sliceData, 'JPEG', 0.5, 0.5, pdfUsableWidth, pdfSliceH);
-
-        pdf.setFontSize(8);
-        pdf.setTextColor(140, 140, 140);
-        pdf.text(`ARCDESIGN Official Statement - ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation} - Page ${pageNum + 1}`, 0.5, 8.1);
-
-        currentY += sliceH;
-        pageNum++;
       }
     }
 
-    updateProcessingStatus("Preparing document for sharing / save...", 90);
+    updateProcessingStatus("Preparing document for export...", 92);
 
     if (destination === 'share' || destination === 'messenger') {
-      if (Android && Android.shareFile) {
+      if (window.Android && window.Android.shareFile) {
         updateProcessingStatus("Opening Share Sheet...", 98);
         const base64Data = pdf.output('datauristring').split(',')[1];
-        Android.shareFile(title, message, base64Data, fileName, "application/pdf", "");
+        window.Android.shareFile(title, message, base64Data, fileName, "application/pdf", "");
       } else if (navigator.share) {
         updateProcessingStatus("Opening Share Sheet...", 98);
         const blob = pdf.output('blob');
@@ -3759,10 +4035,23 @@ async function renderPdfFromHtmlElement(tempContainer, fileName, destination, ti
       } else {
         pdf.save(fileName);
       }
-    } else if (destination === 'print' && Android && Android.printPage) {
-      Android.printPage();
     } else {
-      pdf.save(fileName);
+      // destination === 'device' || 'download' || 'print' -> PROMPT DEVICE PRINT FUNCTION
+      updateProcessingStatus("Prompting device print dialog...", 98);
+      const base64Data = pdf.output('datauristring').split(',')[1];
+      if (window.Android && window.Android.printPdf) {
+        window.Android.printPdf(base64Data, fileName, title);
+      } else if (window.Android && window.Android.printPage) {
+        window.Android.printPage();
+      } else {
+        const blobUrl = pdf.output('bloburl');
+        const printWindow = window.open(blobUrl, '_blank');
+        if (printWindow) {
+          printWindow.onload = () => printWindow.print();
+        } else {
+          pdf.save(fileName);
+        }
+      }
     }
   } catch (err) {
     console.error("PDF generation/export error:", err);
@@ -3775,28 +4064,166 @@ async function renderPdfFromHtmlElement(tempContainer, fileName, destination, ti
   }
 }
 
-async function exportPayrollPdfLandscape(destination = 'device') {
-  const modalTable = document.getElementById("payrollMainTable");
-  if (!modalTable) {
-    alert("Payroll table not found.");
+// --- DYNAMIC PAGE PACKER FOR LEGAL LANDSCAPE PDFS ---
+// Packs rows continuously until reaching bottom of page (maxPageHeight), only moving to next page when worker name reaches the bottom.
+function buildDynamicTableReport({
+  container,
+  items,
+  renderPageSkeleton,
+  renderRowHtml,
+  renderFooterElements,
+  maxPageHeight = 740
+}) {
+  if (!container.parentNode) {
+    document.body.appendChild(container);
+  }
+
+  if (!items || items.length === 0) {
+    const pageObj = renderPageSkeleton(0);
+    pageObj.tbody.innerHTML = `<tr><td colspan="25" style="text-align: center; padding: 24px; color: #71717a; font-weight: 700;">No worker records found for this period.</td></tr>`;
+    if (renderFooterElements) {
+      const { tfootHtml, signaturesHtml } = renderFooterElements();
+      if (tfootHtml && pageObj.table) pageObj.table.insertAdjacentHTML('beforeend', tfootHtml);
+      if (signaturesHtml && pageObj.footerContainer) pageObj.footerContainer.innerHTML = signaturesHtml;
+    }
+    const indicator = pageObj.pageDiv.querySelector('.arc-pdf-page-indicator');
+    if (indicator) indicator.textContent = '(Page 1 of 1)';
+    pageObj.pageDiv.style.minHeight = `${maxPageHeight}px`;
     return;
   }
 
-  showProcessingIndicator("Generating Payroll PDF...", "Processing payroll records and page breaks...");
+  const pages = [];
+  let currentPageObj = renderPageSkeleton(0);
+  pages.push(currentPageObj);
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const isLastItem = (i === items.length - 1);
+    const rowHtml = renderRowHtml(item, i);
+
+    currentPageObj.tbody.insertAdjacentHTML('beforeend', rowHtml);
+    const appendedRow = currentPageObj.tbody.lastElementChild;
+
+    let wouldOverflow = false;
+
+    if (isLastItem && renderFooterElements) {
+      const { tfootHtml, signaturesHtml } = renderFooterElements();
+      let testTfoot = null;
+      if (tfootHtml && currentPageObj.table) {
+        currentPageObj.table.insertAdjacentHTML('beforeend', tfootHtml);
+        testTfoot = currentPageObj.table.querySelector('tfoot');
+      }
+      if (signaturesHtml && currentPageObj.footerContainer) {
+        currentPageObj.footerContainer.innerHTML = signaturesHtml;
+      }
+
+      if (currentPageObj.pageDiv.offsetHeight > maxPageHeight && currentPageObj.tbody.children.length > 1) {
+        wouldOverflow = true;
+      }
+
+      if (testTfoot) testTfoot.remove();
+      if (currentPageObj.footerContainer) currentPageObj.footerContainer.innerHTML = '';
+    } else {
+      if (currentPageObj.pageDiv.offsetHeight > maxPageHeight && currentPageObj.tbody.children.length > 1) {
+        wouldOverflow = true;
+      }
+    }
+
+    if (wouldOverflow) {
+      appendedRow.remove();
+
+      // Start new page
+      currentPageObj = renderPageSkeleton(pages.length);
+      pages.push(currentPageObj);
+
+      currentPageObj.tbody.insertAdjacentHTML('beforeend', rowHtml);
+
+      if (isLastItem && renderFooterElements) {
+        const { tfootHtml, signaturesHtml } = renderFooterElements();
+        if (tfootHtml && currentPageObj.table) currentPageObj.table.insertAdjacentHTML('beforeend', tfootHtml);
+        if (signaturesHtml && currentPageObj.footerContainer) currentPageObj.footerContainer.innerHTML = signaturesHtml;
+      }
+    } else {
+      if (isLastItem && renderFooterElements) {
+        const { tfootHtml, signaturesHtml } = renderFooterElements();
+        if (tfootHtml && currentPageObj.table) currentPageObj.table.insertAdjacentHTML('beforeend', tfootHtml);
+        if (signaturesHtml && currentPageObj.footerContainer) currentPageObj.footerContainer.innerHTML = signaturesHtml;
+      }
+    }
+  }
+
+  // Update page indicators and set min-height to consume full legal landscape page
+  const totalPages = pages.length;
+  pages.forEach((p, idx) => {
+    const indicator = p.pageDiv.querySelector('.arc-pdf-page-indicator');
+    if (indicator) {
+      indicator.textContent = totalPages > 1 ? `(Page ${idx + 1} of ${totalPages})` : `(Page 1 of 1)`;
+    }
+    p.pageDiv.style.minHeight = `${maxPageHeight}px`;
+  });
+}
+
+async function exportPayrollPdfLandscape(destination = 'device') {
+  showProcessingIndicator("Generating Payroll PDF...", "Processing payroll records and calculating page layout...");
 
   const dates = getCalculatedDates();
   const dateRangeStr = getPeriodString(dates);
+  const genDateStr = `${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}, ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`;
 
-  const clone = modalTable.cloneNode(true);
-  clone.querySelectorAll('.no-print').forEach(el => el.remove());
-  clone.querySelectorAll('input').forEach(el => {
-    const span = document.createElement('span');
-    span.innerText = el.value || '-';
-    span.className = "fw-bold";
-    el.parentNode.replaceChild(span, el);
-  });
+  const delSites = getDeletedSites();
+  let sitesToRender = (currentLocation === "VIEW_ALL") 
+    ? Object.keys(currentActiveData.locations || {}).filter(s => !delSites.includes(s.toUpperCase()))
+    : [currentLocation];
 
   const includeSignatures = document.getElementById("payrollSignaturesCheck")?.checked ?? true;
+
+  let allWorkerRows = [];
+  let totalDays = 0;
+  let totalHourlyHours = 0;
+  let totalOTHours = 0;
+  let totalOTPay = 0;
+  let totalGross = 0;
+
+  sitesToRender.forEach(loc => {
+    const locData = currentActiveData.locations[loc];
+    if (!locData) return;
+    let workers = locData.workers || [];
+    if (selectedRolesFilter.length > 0) {
+      workers = workers.filter(w => selectedRolesFilter.includes(w.role));
+    }
+    workers.forEach(w => {
+      const m = getWorkerMetrics(w);
+      const dailyRate = getWorkerRate(w.id, w.role);
+      const hourlyRate = getWorkerHourlyRate(loc, w.id, dailyRate);
+      const otHourlyRate = hourlyRate * 1.0;
+
+      const regularDaysPay = m.daysWorked * dailyRate;
+      const hourlyPay = m.hourlyHours * hourlyRate;
+      const otPay = m.totalOT * otHourlyRate;
+      const gross = regularDaysPay + hourlyPay + otPay;
+      const net = gross;
+
+      totalDays += m.daysWorked;
+      totalHourlyHours += m.hourlyHours;
+      totalOTHours += m.totalOT;
+      totalOTPay += otPay;
+      totalGross += gross;
+
+      allWorkerRows.push({
+        loc: loc,
+        worker: w,
+        metrics: m,
+        dailyRate: dailyRate,
+        hourlyRate: hourlyRate,
+        otPay: otPay,
+        amountPaid: net
+      });
+    });
+  });
+
+  const siteBale = getActiveProjectBaleValue();
+  const totalAmount = totalGross;
+  const finalTotal = Math.max(0, totalAmount - (isProjectBaleDeducted ? siteBale : 0));
 
   const tempContainer = document.createElement('div');
   tempContainer.style.position = 'absolute';
@@ -3804,41 +4231,146 @@ async function exportPayrollPdfLandscape(destination = 'device') {
   tempContainer.style.top = '0';
   tempContainer.style.width = '1300px';
   tempContainer.style.background = '#ffffff';
-  tempContainer.style.padding = '25px';
+  document.body.appendChild(tempContainer);
 
-  tempContainer.innerHTML = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #18181b;">
-      <div style="border-bottom: 3px solid #d11a2a; padding-bottom: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+  function renderPageSkeleton(pageIdx) {
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'arc-pdf-page';
+    pageDiv.style.cssText = 'width: 1300px; padding: 20px 24px; background: #ffffff; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #18181b; display: flex; flex-direction: column; justify-content: flex-start;';
+
+    pageDiv.innerHTML = `
+      <!-- PAGE HEADER WITH METADATA -->
+      <div style="border-bottom: 3px solid #d11a2a; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
         <div>
-          <h2 style="font-weight: 900; color: #18181b; margin: 0; text-transform: uppercase; font-size: 22px;">ARCDESIGN CONSTRUCTION SERVICES</h2>
-          <p style="color: #71717a; margin: 3px 0 0 0; font-size: 13px; font-weight: 700;">OFFICIAL WEEKLY PAYROLL STATEMENT (LEGAL LANDSCAPE)</p>
+          <h2 style="font-weight: 900; color: #18181b; margin: 0; text-transform: uppercase; font-size: 20px; letter-spacing: 0.5px;">ARCDESIGN CONSTRUCTION SERVICES</h2>
+          <p style="color: #71717a; margin: 3px 0 0 0; font-size: 11px; font-weight: 700;">OFFICIAL WEEKLY PAYROLL STATEMENT (LEGAL LANDSCAPE)</p>
         </div>
         <div style="text-align: right;">
-          <span style="font-weight: 800; font-size: 13px; background: #18181b; color: #fff; padding: 5px 12px; border-radius: 4px;">LOCATION: ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation}</span>
-          <div style="font-weight: 700; font-size: 12px; color: #d11a2a; margin-top: 4px;">PERIOD: ${dateRangeStr}</div>
+          <div style="font-weight: 800; font-size: 11px; background: #18181b; color: #fff; padding: 3px 9px; border-radius: 4px; display: inline-block;">LOCATION: ${currentLocation === "VIEW_ALL" ? "ALL SITES" : currentLocation}</div>
+          <div style="font-weight: 700; font-size: 11px; color: #d11a2a; margin-top: 3px;">DATE PERIOD: ${dateRangeStr}</div>
+          <div style="font-weight: 600; font-size: 10px; color: #71717a; margin-top: 2px;">GENERATED: ${genDateStr}</div>
         </div>
       </div>
-      ${clone.outerHTML}
-      ${includeSignatures ? `
-        <div style="display: flex; justify-content: space-between; margin-top: 40px; padding-top: 15px; border-top: 1px solid #e4e4e7;">
-          <div style="text-align: center; width: 30%;">
-            <div style="border-bottom: 1px solid #000; height: 35px;"></div>
-            <div style="font-weight: 800; font-size: 11px; margin-top: 4px;">PREPARED BY (TIMEKEEPER)</div>
-          </div>
-          <div style="text-align: center; width: 30%;">
-            <div style="border-bottom: 1px solid #000; height: 35px;"></div>
-            <div style="font-weight: 800; font-size: 11px; margin-top: 4px;">CHECKED BY (SITE ENGINEER)</div>
-          </div>
-          <div style="text-align: center; width: 30%;">
-            <div style="border-bottom: 1px solid #000; height: 35px;"></div>
-            <div style="font-weight: 800; font-size: 11px; margin-top: 4px;">APPROVED BY (PROJECT MANAGER)</div>
-          </div>
-        </div>
-      ` : ''}
-    </div>
-  `;
 
-  const fileName = `ARCDESIGN_Payroll_${currentLocation}_${currentDate}.pdf`;
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-weight: 800; font-size: 12px; color: #18181b;"><span style="color:#d11a2a;">■</span> PAYROLL ROSTER <span class="arc-pdf-page-indicator"></span></span>
+        <span style="font-size: 11px; color: #71717a;">${allWorkerRows.length} Total Workers</span>
+      </div>
+
+      <!-- PAYROLL TABLE -->
+      <table style="width: 100%; border-collapse: collapse; font-size: 11px; border: 1px solid #d4d4d8;">
+        <thead>
+          <tr style="background: #18181b; color: #ffffff;">
+            <th style="padding: 6px 8px; text-align: left; width: 220px; border: 1px solid #3f3f46;">Worker Name</th>
+            <th style="padding: 6px 4px; text-align: center; width: 90px; border: 1px solid #3f3f46;">Position</th>
+            <th style="padding: 6px 4px; text-align: center; width: 55px; border: 1px solid #3f3f46;">Days</th>
+            <th style="padding: 6px 4px; text-align: center; width: 55px; border: 1px solid #3f3f46;">Hourly</th>
+            <th style="padding: 6px 4px; text-align: center; width: 55px; border: 1px solid #3f3f46;">OT (hrs)</th>
+            <th style="padding: 6px 4px; text-align: center; width: 85px; border: 1px solid #3f3f46;">Rate / Day</th>
+            <th style="padding: 6px 4px; text-align: center; width: 85px; border: 1px solid #3f3f46;">Rate / Hr</th>
+            <th style="padding: 6px 8px; text-align: right; width: 95px; border: 1px solid #3f3f46;">OT Amount</th>
+            <th style="padding: 6px 8px; text-align: right; width: 110px; background: #d11a2a; color: #ffffff; border: 1px solid #b91c1c;">Amount Paid</th>
+            <th style="padding: 6px 4px; text-align: center; width: 100px; border: 1px solid #3f3f46;">Signature</th>
+            <th style="padding: 6px 8px; text-align: left; width: 120px; border: 1px solid #3f3f46;">Remarks</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="arc-pdf-footer-placeholder"></div>
+    `;
+
+    tempContainer.appendChild(pageDiv);
+    return {
+      pageDiv,
+      table: pageDiv.querySelector('table'),
+      tbody: pageDiv.querySelector('tbody'),
+      footerContainer: pageDiv.querySelector('.arc-pdf-footer-placeholder')
+    };
+  }
+
+  function renderRowHtml(r, idx) {
+    const safeName = (r.worker.name || '').replace(/ /g, '&nbsp;');
+    return `
+      <tr style="border-bottom: 1px solid #e4e4e7;">
+        <td style="padding: 6px 8px; font-weight: 800; text-transform: uppercase; border: 1px solid #d4d4d8;">${safeName}</td>
+        <td style="padding: 6px 4px; text-align: center; font-size: 10px; font-weight: 700; color: #52525b; border: 1px solid #d4d4d8;">${r.worker.role}</td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 800; border: 1px solid #d4d4d8;">${r.metrics.daysWorked > 0 ? r.metrics.daysWorked.toFixed(1) : '-'}</td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 700; color: #52525b; border: 1px solid #d4d4d8;">${r.metrics.hourlyHours > 0 ? `${r.metrics.hourlyHours}h` : '-'}</td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 800; color: #d11a2a; border: 1px solid #d4d4d8;">${r.metrics.totalOT > 0 ? `${r.metrics.totalOT}h` : '-'}</td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 700; border: 1px solid #d4d4d8;">₱${r.dailyRate}</td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 700; border: 1px solid #d4d4d8;">₱${r.hourlyRate}</td>
+        <td style="padding: 6px 8px; text-align: right; font-weight: 800; color: #d11a2a; border: 1px solid #d4d4d8;">₱${r.otPay.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+        <td style="padding: 6px 8px; text-align: right; font-weight: 800; background: #fff1f2; color: #b91c1c; border: 1px solid #fecdd3;">₱${r.amountPaid.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+        <td style="padding: 6px 4px; border: 1px solid #d4d4d8; height: 26px;"></td>
+        <td style="padding: 6px 8px; font-size: 10px; color: #3f3f46; border: 1px solid #d4d4d8;">${(r.worker.remarks || '-').replace(/</g, '&lt;')}</td>
+      </tr>
+    `;
+  }
+
+  function renderFooterElements() {
+    const tfootHtml = `
+      <tfoot>
+        <tr style="background: #f4f4f5; font-weight: 800; border-top: 2px solid #3f3f46;">
+          <td colspan="2" style="padding: 6px 8px; text-align: right; border: 1px solid #d4d4d8;">WAGES SUB-TOTAL:</td>
+          <td style="padding: 6px 4px; text-align: center; border: 1px solid #d4d4d8;">${totalDays.toFixed(1)}d</td>
+          <td style="padding: 6px 4px; text-align: center; border: 1px solid #d4d4d8;">${totalHourlyHours}h</td>
+          <td style="padding: 6px 4px; text-align: center; color: #d11a2a; border: 1px solid #d4d4d8;">${totalOTHours}h</td>
+          <td colspan="2" style="padding: 6px 8px; text-align: center; font-size: 10px; color: #71717a; border: 1px solid #d4d4d8;">Overtime Total:</td>
+          <td style="padding: 6px 8px; text-align: right; color: #d11a2a; border: 1px solid #d4d4d8;">₱${totalOTPay.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+          <td style="padding: 6px 8px; text-align: right; font-weight: 900; border: 1px solid #d4d4d8;">₱${totalAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+          <td colspan="2" style="border: 1px solid #d4d4d8;"></td>
+        </tr>
+        <!-- TOTAL AMOUNT -->
+        <tr style="background: #e4e4e7; font-weight: 800; font-size: 12px;">
+          <td colspan="7" style="padding: 6px 10px; text-align: right; border: 1px solid #d4d4d8; color: #18181b;">TOTAL AMOUNT:</td>
+          <td colspan="2" style="padding: 6px 10px; text-align: right; border: 1px solid #d4d4d8; color: #18181b; font-size: 13px;">₱${totalAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+          <td colspan="2" style="padding: 6px 8px; border: 1px solid #d4d4d8; font-size: 10px; color: #52525b;">Total Worker Wages</td>
+        </tr>
+        <!-- BALE AMOUNT (DEDUCTED OR EXCLUDED) -->
+        <tr style="background: #fef3c7; font-weight: 800; font-size: 12px;">
+          <td colspan="7" style="padding: 6px 10px; text-align: right; border: 1px solid #d4d4d8; color: #b45309;">BALE AMOUNT (${isProjectBaleDeducted ? 'DEDUCTED' : 'EXCLUDED'}):</td>
+          <td colspan="2" style="padding: 6px 10px; text-align: right; border: 1px solid #d4d4d8; color: #b91c1c; font-size: 13px;">${isProjectBaleDeducted ? `-₱${siteBale.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : '₱0.00 (Toggle OFF)'}</td>
+          <td colspan="2" style="padding: 6px 8px; border: 1px solid #d4d4d8; font-size: 10px; color: #78350f;">${currentLocation === "VIEW_ALL" ? 'All Sites Bale' : 'Site Project Bale'}</td>
+        </tr>
+        <!-- TOTAL -->
+        <tr style="background: #18181b; color: #ffffff; font-weight: 900; font-size: 13px; border-top: 2px solid #d11a2a;">
+          <td colspan="7" style="padding: 8px 10px; text-align: right; border: 1px solid #27272a; color: #ffffff;">TOTAL:</td>
+          <td colspan="2" style="padding: 8px 10px; text-align: right; border: 1px solid #b91c1c; background: #d11a2a; color: #ffffff; font-size: 15px;">₱${finalTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+          <td colspan="2" style="padding: 8px 8px; border: 1px solid #27272a; font-size: 10px; color: #a1a1aa;">Final Net Payout</td>
+        </tr>
+      </tfoot>
+    `;
+
+    const signaturesHtml = (includeSignatures ? `
+      <div style="display: flex; justify-content: space-between; margin-top: 24px; padding-top: 10px; border-top: 1.5px solid #e4e4e7;">
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 28px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">PREPARED BY (TIMEKEEPER)</div>
+        </div>
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 28px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">CHECKED BY (SITE ENGINEER)</div>
+        </div>
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 28px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">APPROVED BY (PROJECT MANAGER)</div>
+        </div>
+      </div>
+    ` : '');
+
+    return { tfootHtml, signaturesHtml };
+  }
+
+  buildDynamicTableReport({
+    container: tempContainer,
+    items: allWorkerRows,
+    renderPageSkeleton,
+    renderRowHtml,
+    renderFooterElements,
+    maxPageHeight: 740
+  });
+
+  const fileName = getStandardExportFileName("Payroll", "pdf");
   await renderPdfFromHtmlElement(tempContainer, fileName, destination, "ARCDESIGN Payroll PDF", `Payroll report for ${currentLocation} (${dateRangeStr})`);
 }
 
@@ -3854,354 +4386,465 @@ function exportToPDF(event) {
 async function handlePdfExportAction(actionType) {
   const isTimesheet = document.getElementById("pdfChoiceTimesheet")?.checked ?? true;
   const includeSignatures = document.getElementById("pdfIncludeSignaturesCheck")?.checked ?? true;
+  const includeWorkerBale = document.getElementById("pdfIncludeWorkerBaleCheck")?.checked ?? true;
 
   const modalEl = document.getElementById("arcPdfConfigModal");
   if (modalEl && window.bootstrap) {
     bootstrap.Modal.getInstance(modalEl)?.hide();
   }
 
-  await generatePDF(actionType, isTimesheet, includeSignatures);
+  await generatePDF(actionType, isTimesheet, includeSignatures, includeWorkerBale);
 }
 
-// --- CLEAN TIMESHEET HTML BUILDER FOR MULTI-PAGE EXPORT ---
-function buildCleanTimesheetHtml(sitesToRender, dates, includeSignatures) {
+// --- DYNAMIC TIMESHEET PAGES BUILDER FOR MULTI-PAGE EXPORT ---
+function buildDynamicTimesheetPages(tempContainer, sitesToRender, dates, includeSignatures, includeWorkerBale = true) {
   const dateRangeStr = getPeriodString(dates);
-  let html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #18181b; background: #ffffff; padding: 20px;">
-      <div style="border-bottom: 3px solid #d11a2a; padding-bottom: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <h2 style="font-weight: 900; color: #18181b; margin: 0; text-transform: uppercase; font-size: 22px; letter-spacing: 0.5px;">ARCDESIGN CONSTRUCTION SERVICES</h2>
-          <p style="color: #71717a; margin: 4px 0 0 0; font-size: 13px; font-weight: 700;">OFFICIAL ATTENDANCE & TIMESHEET STATEMENT (LEGAL LANDSCAPE)</p>
-        </div>
-        <div style="text-align: right;">
-          <span style="font-weight: 800; font-size: 13px; background: #18181b; color: #fff; padding: 6px 14px; border-radius: 4px;">LOCATION: ${currentLocation === 'VIEW_ALL' ? 'ALL SITES' : currentLocation}</span>
-          <div style="font-weight: 700; font-size: 13px; color: #d11a2a; margin-top: 5px;">PERIOD: ${dateRangeStr}</div>
-        </div>
-      </div>
-  `;
+  const genDateStr = `${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}, ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`;
 
-  sitesToRender.forEach((loc) => {
+  let allSiteWorkers = [];
+  sitesToRender.forEach(loc => {
     const locData = currentActiveData.locations[loc];
     if (!locData) return;
     let workers = locData.workers || [];
     if (selectedRolesFilter.length > 0) {
       workers = workers.filter(w => selectedRolesFilter.includes(w.role));
     }
-    if (workers.length === 0) return;
-
-    let siteTotalDays = 0;
-    let siteTotalHourly = 0;
-    let siteTotalOT = 0;
-    let siteTotalBale = 0;
-
-    html += `
-      <div style="margin-bottom: 28px;">
-        <div style="background: #18181b; color: #ffffff; padding: 8px 14px; font-weight: 800; font-size: 14px; border-radius: 4px 4px 0 0; display: flex; justify-content: space-between;">
-          <span><span style="color:#d11a2a; margin-right: 6px;">■</span>SITE: ${loc}</span>
-          <span style="font-size: 12px; color: #a1a1aa;">${workers.length} Workers Listed</span>
-        </div>
-        <table style="width: 100%; border-collapse: collapse; font-size: 11px; border: 1px solid #d4d4d8;">
-          <thead>
-            <tr style="background: #f4f4f5; border-bottom: 2px solid #a1a1aa;">
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: left; width: 220px;">WORKER NAME</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 85px;">ROLE</th>
-              ${dates.map(d => `
-                <th style="border: 1px solid #d4d4d8; padding: 6px 2px; text-align: center; min-width: 60px;">
-                  <div style="font-weight: 800; font-size: 11px; color: #18181b;">${d.dayNameShort || d.key}</div>
-                  <div style="font-weight: 700; font-size: 11px; color: #d11a2a;">${d.dayNum}</div>
-                </th>
-              `).join('')}
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 65px; background: #e4e4e7;">DAYS</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 65px; background: #e4e4e7;">OT</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: right; width: 85px;">BALE</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: left; width: 170px;">REMARKS</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${workers.map(w => {
-              const m = getWorkerMetrics(w);
-              siteTotalDays += m.daysWorked;
-              siteTotalHourly += m.hourlyHours;
-              siteTotalOT += m.totalOT;
-              siteTotalBale += (w.baleValue || 0);
-
-              return `
-                <tr style="border-bottom: 1px solid #e4e4e7;">
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 8px; font-weight: 800; text-transform: uppercase;">
-                    ${w.name}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-size: 10px; font-weight: 700; color: #52525b;">
-                    ${w.role}
-                  </td>
-                  ${dates.map(d => {
-                    const val = getWorkerAttendanceVal(w, d);
-                    const otVal = getWorkerOtVal(w, d);
-                    let badgeHtml = '<span style="color:#a1a1aa; font-weight:700;">-</span>';
-                    if (val === '1.0' || val === '1') {
-                      badgeHtml = '<span style="background: #198754; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: 800; font-size: 10px;">Full</span>';
-                    } else if (val === '0.5') {
-                      badgeHtml = '<span style="background: #0d6efd; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: 800; font-size: 10px;">Half</span>';
-                    } else if (String(val).endsWith('h')) {
-                      badgeHtml = `<span style="background: #6f42c1; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: 800; font-size: 10px;">${val}</span>`;
-                    } else if (val === 'absent') {
-                      badgeHtml = '<span style="background: #dc3545; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: 800; font-size: 10px;">Abs</span>';
-                    } else if (val === 'sick') {
-                      badgeHtml = '<span style="background: #ffc107; color: #000; padding: 2px 6px; border-radius: 3px; font-weight: 800; font-size: 10px;">Sick</span>';
-                    } else if (val === 'emergency') {
-                      badgeHtml = '<span style="background: #fd7e14; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: 800; font-size: 10px;">Emg</span>';
-                    }
-
-                    return `
-                      <td style="border: 1px solid #d4d4d8; padding: 4px 2px; text-align: center;">
-                        <div>${badgeHtml}</div>
-                        ${otVal > 0 ? `<div style="color:#d11a2a; font-weight:800; font-size:9px; margin-top:2px;">+${otVal}h</div>` : ''}
-                      </td>
-                    `;
-                  }).join('')}
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-weight: 800; background: #fafafa; font-size: 12px;">
-                    ${m.daysWorked.toFixed(1)}
-                    ${m.hourlyHours > 0 ? `<div style="font-size:9px; color:#52525b;">+${m.hourlyHours}h</div>` : ''}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-weight: 800; color: #d11a2a; background: #fafafa; font-size: 12px;">
-                    ${m.totalOT > 0 ? `${m.totalOT}h` : '-'}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 8px; text-align: right; font-weight: 700;">
-                    ${(w.baleValue || 0) > 0 ? `₱${(w.baleValue).toLocaleString()}` : '-'}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 8px; font-size: 10px; color: #3f3f46;">
-                    ${(w.remarks || '-').replace(/</g, '&lt;')}
-                  </td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-          <tfoot>
-            <tr style="background: #18181b; color: #ffffff; font-weight: 800; font-size: 11px;">
-              <td colspan="2" style="border: 1px solid #27272a; padding: 8px 10px; text-align: right;">TOTALS FOR ${loc}:</td>
-              <td colspan="${dates.length}" style="border: 1px solid #27272a; padding: 8px; text-align: center; color: #a1a1aa; font-size: 10px;">SITE SUB-TOTALS</td>
-              <td style="border: 1px solid #27272a; padding: 8px; text-align: center; color: #ffffff;">${siteTotalDays.toFixed(1)}d</td>
-              <td style="border: 1px solid #27272a; padding: 8px; text-align: center; color: #f59e0b;">${siteTotalOT}h</td>
-              <td style="border: 1px solid #27272a; padding: 8px 10px; text-align: right; color: #f87171;">₱${siteTotalBale.toLocaleString()}</td>
-              <td style="border: 1px solid #27272a; padding: 8px;"></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-    `;
+    workers.forEach(w => allSiteWorkers.push({ loc, worker: w }));
   });
 
-  if (includeSignatures) {
-    html += `
-      <div style="display: flex; justify-content: space-between; margin-top: 35px; padding-top: 15px; border-top: 2px solid #e4e4e7;">
-        <div style="text-align: center; width: 30%;">
-          <div style="border-bottom: 1.5px solid #000; height: 35px;"></div>
-          <div style="font-weight: 800; font-size: 11px; margin-top: 5px;">PREPARED BY (TIMEKEEPER)</div>
+  let grandTotalDays = 0;
+  let grandTotalHourly = 0;
+  let grandTotalOT = 0;
+  let grandTotalBale = 0;
+
+  allSiteWorkers.forEach(item => {
+    const m = getWorkerMetrics(item.worker);
+    grandTotalDays += m.daysWorked;
+    grandTotalHourly += m.hourlyHours;
+    grandTotalOT += m.totalOT;
+    grandTotalBale += (item.worker.baleValue || 0);
+  });
+
+  function renderPageSkeleton(pageIdx) {
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'arc-pdf-page';
+    pageDiv.style.cssText = 'width: 1300px; padding: 20px 24px; background: #ffffff; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #18181b; display: flex; flex-direction: column; justify-content: flex-start;';
+
+    pageDiv.innerHTML = `
+      <!-- HEADER WITH METADATA -->
+      <div style="border-bottom: 3px solid #d11a2a; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2 style="font-weight: 900; color: #18181b; margin: 0; text-transform: uppercase; font-size: 20px; letter-spacing: 0.5px;">ARCDESIGN CONSTRUCTION SERVICES</h2>
+          <p style="color: #71717a; margin: 3px 0 0 0; font-size: 11px; font-weight: 700;">OFFICIAL ATTENDANCE & TIMESHEET STATEMENT (LEGAL LANDSCAPE)</p>
         </div>
-        <div style="text-align: center; width: 30%;">
-          <div style="border-bottom: 1.5px solid #000; height: 35px;"></div>
-          <div style="font-weight: 800; font-size: 11px; margin-top: 5px;">CHECKED BY (SITE ENGINEER)</div>
-        </div>
-        <div style="text-align: center; width: 30%;">
-          <div style="border-bottom: 1.5px solid #000; height: 35px;"></div>
-          <div style="font-weight: 800; font-size: 11px; margin-top: 5px;">APPROVED BY (PROJECT MANAGER)</div>
+        <div style="text-align: right;">
+          <div style="font-weight: 800; font-size: 11px; background: #18181b; color: #fff; padding: 3px 9px; border-radius: 4px; display: inline-block;">LOCATION: ${currentLocation === 'VIEW_ALL' ? 'ALL SITES' : currentLocation}</div>
+          <div style="font-weight: 700; font-size: 11px; color: #d11a2a; margin-top: 3px;">DATE PERIOD: ${dateRangeStr}</div>
+          <div style="font-weight: 600; font-size: 10px; color: #71717a; margin-top: 2px;">GENERATED: ${genDateStr}</div>
         </div>
       </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-weight: 800; font-size: 12px; color: #18181b;"><span style="color:#d11a2a;">■</span> FULL TIMESHEET ROSTER <span class="arc-pdf-page-indicator"></span></span>
+        <span style="font-size: 11px; color: #71717a;">${allSiteWorkers.length} Workers Listed ${!includeWorkerBale ? '&bull; Worker Bale Column Excluded' : ''}</span>
+      </div>
+
+      <table style="width: 100%; border-collapse: collapse; font-size: 11px; border: 1px solid #d4d4d8;">
+        <thead>
+          <tr style="background: #f4f4f5; border-bottom: 2px solid #a1a1aa;">
+            <th style="border: 1px solid #d4d4d8; padding: 6px 8px; text-align: left; width: 220px;">WORKER NAME</th>
+            <th style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; width: 85px;">ROLE</th>
+            ${currentLocation === 'VIEW_ALL' ? '<th style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; width: 80px;">SITE</th>' : ''}
+            ${dates.map(d => `
+              <th style="border: 1px solid #d4d4d8; padding: 5px 2px; text-align: center; min-width: 55px;">
+                <div style="font-weight: 800; font-size: 11px; color: #18181b;">${d.dayNameShort || d.key}</div>
+                <div style="font-weight: 700; font-size: 11px; color: #d11a2a;">${d.dayNum}</div>
+              </th>
+            `).join('')}
+            <th style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; width: 55px; background: #e4e4e7;">DAYS</th>
+            <th style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; width: 55px; background: #e4e4e7;">OT</th>
+            ${includeWorkerBale ? '<th style="border: 1px solid #d4d4d8; padding: 6px 8px; text-align: right; width: 80px;">BALE</th>' : ''}
+            <th style="border: 1px solid #d4d4d8; padding: 6px 8px; text-align: left; width: 170px;">REMARKS</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="arc-pdf-footer-placeholder"></div>
+    `;
+
+    tempContainer.appendChild(pageDiv);
+    return {
+      pageDiv,
+      table: pageDiv.querySelector('table'),
+      tbody: pageDiv.querySelector('tbody'),
+      footerContainer: pageDiv.querySelector('.arc-pdf-footer-placeholder')
+    };
+  }
+
+  function renderRowHtml(item, idx) {
+    const w = item.worker;
+    const m = getWorkerMetrics(w);
+
+    return `
+      <tr style="border-bottom: 1px solid #e4e4e7;">
+        <td style="border: 1px solid #d4d4d8; padding: 6px 8px; font-weight: 800; text-transform: uppercase;">${w.name}</td>
+        <td style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; font-size: 10px; font-weight: 700; color: #52525b;">${w.role}</td>
+        ${currentLocation === 'VIEW_ALL' ? `<td style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; font-size: 10px; font-weight: 700; color: #d11a2a;">${item.loc}</td>` : ''}
+        ${dates.map(d => {
+          const val = getWorkerAttendanceVal(w, d);
+          const otVal = getWorkerOtVal(w, d);
+          let badgeHtml = '<span style="color:#a1a1aa; font-weight:700;">-</span>';
+          if (val === '1.0' || val === '1') {
+            badgeHtml = '<span style="background: #198754; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Full</span>';
+          } else if (val === '0.5') {
+            badgeHtml = '<span style="background: #0d6efd; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Half</span>';
+          } else if (String(val).endsWith('h')) {
+            badgeHtml = `<span style="background: #6f42c1; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">${val}</span>`;
+          } else if (val === 'absent') {
+            badgeHtml = '<span style="background: #dc3545; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Abs</span>';
+          } else if (val === 'sick') {
+            badgeHtml = '<span style="background: #ffc107; color: #000; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Sick</span>';
+          } else if (val === 'emergency') {
+            badgeHtml = '<span style="background: #fd7e14; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Emg</span>';
+          }
+          return `
+            <td style="border: 1px solid #d4d4d8; padding: 4px 2px; text-align: center;">
+              <div>${badgeHtml}</div>
+              ${otVal > 0 ? `<div style="color:#d11a2a; font-weight:800; font-size:9px; margin-top:1px;">+${otVal}h</div>` : ''}
+            </td>
+          `;
+        }).join('')}
+        <td style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; font-weight: 800; background: #fafafa; font-size: 11px;">
+          ${m.daysWorked.toFixed(1)}
+          ${m.hourlyHours > 0 ? `<div style="font-size:9px; color:#52525b;">+${m.hourlyHours}h</div>` : ''}
+        </td>
+        <td style="border: 1px solid #d4d4d8; padding: 6px 4px; text-align: center; font-weight: 800; color: #d11a2a; background: #fafafa; font-size: 11px;">
+          ${m.totalOT > 0 ? `${m.totalOT}h` : '-'}
+        </td>
+        ${includeWorkerBale ? `
+          <td style="border: 1px solid #d4d4d8; padding: 6px 8px; text-align: right; font-weight: 700;">
+            ${(w.baleValue || 0) > 0 ? `₱${(w.baleValue).toLocaleString()}` : '-'}
+          </td>
+        ` : ''}
+        <td style="border: 1px solid #d4d4d8; padding: 6px 8px; font-size: 10px; color: #3f3f46;">
+          ${(w.remarks || '-').replace(/</g, '&lt;')}
+        </td>
+      </tr>
     `;
   }
 
-  html += `</div>`;
-  return html;
-}
+  function renderFooterElements() {
+    const tfootHtml = `
+      <tfoot>
+        <tr style="background: #18181b; color: #ffffff; font-weight: 800; font-size: 11px;">
+          <td colspan="${currentLocation === 'VIEW_ALL' ? 3 : 2}" style="border: 1px solid #27272a; padding: 7px 10px; text-align: right;">GRAND TOTALS:</td>
+          <td colspan="${dates.length}" style="border: 1px solid #27272a; padding: 7px; text-align: center; color: #a1a1aa; font-size: 10px;">ALL LISTED WORKERS</td>
+          <td style="border: 1px solid #27272a; padding: 7px; text-align: center; color: #ffffff;">${grandTotalDays.toFixed(1)}d</td>
+          <td style="border: 1px solid #27272a; padding: 7px; text-align: center; color: #f59e0b;">${grandTotalOT}h</td>
+          ${includeWorkerBale ? `<td style="border: 1px solid #27272a; padding: 7px 10px; text-align: right; color: #f87171;">₱${grandTotalBale.toLocaleString()}</td>` : ''}
+          <td style="border: 1px solid #27272a; padding: 7px;"></td>
+        </tr>
+      </tfoot>
+    `;
 
-// --- CLEAN ANALYTICS & REMARKS HTML BUILDER FOR MULTI-PAGE EXPORT ---
-function buildCleanAnalyticsHtml(sitesToRender, dates, includeSignatures) {
-  const dateRangeStr = getPeriodString(dates);
-  let html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #18181b; background: #ffffff; padding: 20px;">
-      <div style="border-bottom: 3px solid #d11a2a; padding-bottom: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <h2 style="font-weight: 900; color: #18181b; margin: 0; text-transform: uppercase; font-size: 22px; letter-spacing: 0.5px;">ARCDESIGN CONSTRUCTION SERVICES</h2>
-          <p style="color: #71717a; margin: 4px 0 0 0; font-size: 13px; font-weight: 700;">OFFICIAL SITE ANALYTICS & REMARKS STATEMENT (LEGAL LANDSCAPE)</p>
+    const signaturesHtml = (includeSignatures ? `
+      <div style="display: flex; justify-content: space-between; margin-top: 24px; padding-top: 10px; border-top: 1.5px solid #e4e4e7;">
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 28px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">PREPARED BY (TIMEKEEPER)</div>
         </div>
-        <div style="text-align: right;">
-          <span style="font-weight: 800; font-size: 13px; background: #18181b; color: #fff; padding: 6px 14px; border-radius: 4px;">LOCATION: ${currentLocation === 'VIEW_ALL' ? 'ALL SITES' : currentLocation}</span>
-          <div style="font-weight: 700; font-size: 13px; color: #d11a2a; margin-top: 5px;">PERIOD: ${dateRangeStr}</div>
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 28px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">CHECKED BY (SITE ENGINEER)</div>
+        </div>
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 28px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">APPROVED BY (PROJECT MANAGER)</div>
         </div>
       </div>
-  `;
+    ` : '');
 
-  sitesToRender.forEach((loc) => {
+    return { tfootHtml, signaturesHtml };
+  }
+
+  buildDynamicTableReport({
+    container: tempContainer,
+    items: allSiteWorkers,
+    renderPageSkeleton,
+    renderRowHtml,
+    renderFooterElements,
+    maxPageHeight: 740
+  });
+}
+
+// --- DYNAMIC ANALYTICS & REMARKS PAGES BUILDER FOR MULTI-PAGE EXPORT ---
+function buildDynamicAnalyticsPages(tempContainer, sitesToRender, dates, includeSignatures) {
+  const dateRangeStr = getPeriodString(dates);
+  const genDateStr = `${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}, ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`;
+
+  let allSiteWorkers = [];
+  let allSitesRemarks = [];
+
+  sitesToRender.forEach(loc => {
     const locData = currentActiveData.locations[loc];
     if (!locData) return;
     let workers = locData.workers || [];
     if (selectedRolesFilter.length > 0) {
       workers = workers.filter(w => selectedRolesFilter.includes(w.role));
     }
-    if (workers.length === 0) return;
+    workers.forEach(w => allSiteWorkers.push({ loc, worker: w }));
 
-    let siteTotalDays = 0;
-    let siteTotalOT = 0;
-    let siteTotalBale = 0;
-    let totalExpectedShifts = workers.length * 6;
-    let totalPresentDays = 0;
+    if (locData.siteRemarksHistory && locData.siteRemarksHistory.length > 0) {
+      allSitesRemarks.push({
+        loc: loc,
+        remarks: locData.siteRemarksHistory
+      });
+    }
+  });
 
-    workers.forEach(w => {
-      const m = getWorkerMetrics(w);
-      siteTotalDays += m.daysWorked;
-      siteTotalOT += m.totalOT;
-      siteTotalBale += (w.baleValue || 0);
-      totalPresentDays += m.daysWorked;
+  function renderPageSkeleton(pageIdx) {
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'arc-pdf-page';
+    pageDiv.style.cssText = 'width: 1300px; padding: 20px 24px; background: #ffffff; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #18181b; display: flex; flex-direction: column; justify-content: flex-start;';
+
+    pageDiv.innerHTML = `
+      <!-- HEADER WITH METADATA -->
+      <div style="border-bottom: 3px solid #d11a2a; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2 style="font-weight: 900; color: #18181b; margin: 0; text-transform: uppercase; font-size: 20px; letter-spacing: 0.5px;">ARCDESIGN CONSTRUCTION SERVICES</h2>
+          <p style="color: #71717a; margin: 3px 0 0 0; font-size: 11px; font-weight: 700;">OFFICIAL SITE ANALYTICS & REMARKS STATEMENT (LEGAL LANDSCAPE)</p>
+        </div>
+        <div style="text-align: right;">
+          <div style="font-weight: 800; font-size: 11px; background: #18181b; color: #fff; padding: 3px 9px; border-radius: 4px; display: inline-block;">LOCATION: ${currentLocation === 'VIEW_ALL' ? 'ALL SITES' : currentLocation}</div>
+          <div style="font-weight: 700; font-size: 11px; color: #d11a2a; margin-top: 3px;">DATE PERIOD: ${dateRangeStr}</div>
+          <div style="font-weight: 600; font-size: 10px; color: #71717a; margin-top: 2px;">GENERATED: ${genDateStr}</div>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-weight: 800; font-size: 12px; color: #18181b;"><span style="color:#d11a2a;">■</span> WORKER ATTENDANCE ANALYTICS & FIELD NOTES <span class="arc-pdf-page-indicator"></span></span>
+        <span style="font-size: 11px; color: #71717a;">${allSiteWorkers.length} Workers Evaluated &bull; Circular Gauges & Attendance Distribution</span>
+      </div>
+
+      <!-- WORKER CARDS TABLE -->
+      <table style="width: 100%; border-collapse: collapse; font-size: 11px; border: 1px solid #d4d4d8;">
+        <thead>
+          <tr style="background: #18181b; color: #ffffff;">
+            <th style="padding: 7px 8px; text-align: left; width: 170px; border: 1px solid #3f3f46;">Worker & Position</th>
+            <th style="padding: 7px 4px; text-align: center; width: 85px; border: 1px solid #3f3f46;">Circle %</th>
+            <th style="padding: 7px 8px; text-align: left; width: 210px; border: 1px solid #3f3f46;">Attendance Graph</th>
+            <th style="padding: 7px 4px; text-align: center; width: 55px; border: 1px solid #3f3f46;">Days</th>
+            <th style="padding: 7px 4px; text-align: center; width: 55px; border: 1px solid #3f3f46;">OT</th>
+            <th style="padding: 7px 8px; text-align: left; width: 275px; border: 1px solid #3f3f46; background: #27272a;"><span style="color: #f87171;">●</span> Automated System Remarks</th>
+            <th style="padding: 7px 8px; text-align: left; width: 180px; border: 1px solid #3f3f46;">Worker Notes & Remarks</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="arc-pdf-footer-placeholder"></div>
+    `;
+
+    tempContainer.appendChild(pageDiv);
+    return {
+      pageDiv,
+      table: pageDiv.querySelector('table'),
+      tbody: pageDiv.querySelector('tbody'),
+      footerContainer: pageDiv.querySelector('.arc-pdf-footer-placeholder')
+    };
+  }
+
+  function renderRowHtml(item, idx) {
+    const w = item.worker;
+    const m = getWorkerMetrics(w);
+    const workerAttPct = Math.min(100, Math.round((m.daysWorked / 6) * 100));
+    const pctColor = workerAttPct >= 80 ? '#16a34a' : (workerAttPct >= 50 ? '#2563eb' : '#dc2626');
+
+    let fullCnt = 0, halfCnt = 0, hourlyCnt = 0, absentCnt = 0, sickCnt = 0, emgCnt = 0;
+    dates.forEach(d => {
+      const v = getWorkerAttendanceVal(w, d);
+      if (v === '1.0' || v === '1') fullCnt++;
+      else if (v === '0.5') halfCnt++;
+      else if (String(v).endsWith('h')) hourlyCnt++;
+      else if (v === 'absent') absentCnt++;
+      else if (v === 'sick') sickCnt++;
+      else if (v === 'emergency') emgCnt++;
     });
 
-    const attendancePct = totalExpectedShifts > 0 ? Math.min(100, Math.round((totalPresentDays / totalExpectedShifts) * 100)) : 0;
+    const totalShifts = 6;
+    const pFull = Math.round((fullCnt / totalShifts) * 100);
+    const pHalf = Math.round((halfCnt / totalShifts) * 100);
+    const pHourly = Math.round((hourlyCnt / totalShifts) * 100);
+    const pAbsent = Math.round((absentCnt / totalShifts) * 100);
+    const pSick = Math.round((sickCnt / totalShifts) * 100);
+    const pEmergency = Math.round((emgCnt / totalShifts) * 100);
 
-    html += `
-      <div style="margin-bottom: 30px;">
-        <div style="background: #18181b; color: #ffffff; padding: 8px 14px; font-weight: 800; font-size: 14px; border-radius: 4px 4px 0 0; display: flex; justify-content: space-between;">
-          <span><span style="color:#d11a2a; margin-right: 6px;">■</span>SITE ANALYTICS: ${loc}</span>
-          <span style="font-size: 12px; color: #a1a1aa;">${workers.length} Active Workers</span>
-        </div>
+    const autoRemarks = getWorkerAutomatedRemarks(w, dates);
+    const historyNotes = (w.notesHistory || []).slice(-2).map(n => n.text).join('; ');
 
-        <!-- KPI SUMMARY METRICS -->
-        <div style="display: flex; gap: 10px; margin: 12px 0 16px 0;">
-          <div style="flex: 1; border: 1px solid #e4e4e7; border-radius: 6px; padding: 10px; text-align: center; background: #fafafa;">
-            <div style="font-size: 10px; font-weight: 800; color: #71717a; text-transform: uppercase;">Headcount</div>
-            <div style="font-size: 20px; font-weight: 900; color: #18181b; margin-top: 2px;">${workers.length}</div>
+    return `
+      <tr style="border-bottom: 1px solid #e4e4e7;">
+        <td style="padding: 8px 8px; border: 1px solid #d4d4d8;">
+          <div style="font-weight: 800; text-transform: uppercase; font-size: 11px;">${w.name}</div>
+          <div style="font-size: 10px; color: #71717a; margin-top: 2px;">
+            <span style="background: #f4f4f5; padding: 1px 5px; border-radius: 3px; font-weight: 700;">${w.role}</span>
+            ${currentLocation === 'VIEW_ALL' ? `<span style="color: #d11a2a; margin-left: 4px; font-weight: 700;">${item.loc}</span>` : ''}
           </div>
-          <div style="flex: 1; border: 1px solid #e4e4e7; border-radius: 6px; padding: 10px; text-align: center; background: #fafafa;">
-            <div style="font-size: 10px; font-weight: 800; color: #71717a; text-transform: uppercase;">Total Days</div>
-            <div style="font-size: 20px; font-weight: 900; color: #18181b; margin-top: 2px;">${siteTotalDays.toFixed(1)}</div>
+        </td>
+        <td style="padding: 6px 4px; text-align: center; border: 1px solid #d4d4d8;">
+          <!-- SVG CIRCLE PERCENTAGE GAUGE -->
+          <div style="position: relative; width: 38px; height: 38px; display: inline-flex; justify-content: center; align-items: center;">
+            <svg viewBox="0 0 36 36" style="width: 38px; height: 38px; transform: rotate(-90deg);">
+              <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#e4e4e7" stroke-width="4.5" />
+              <path stroke-dasharray="${workerAttPct}, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="${pctColor}" stroke-width="4.5" />
+            </svg>
+            <div style="position: absolute; text-align: center; font-size: 9px; font-weight: 800; color: ${pctColor};">${workerAttPct}%</div>
           </div>
-          <div style="flex: 1; border: 1px solid #e4e4e7; border-radius: 6px; padding: 10px; text-align: center; background: #fafafa;">
-            <div style="font-size: 10px; font-weight: 800; color: #71717a; text-transform: uppercase;">Overtime (OT)</div>
-            <div style="font-size: 20px; font-weight: 900; color: #d11a2a; margin-top: 2px;">${siteTotalOT}h</div>
+        </td>
+        <td style="padding: 8px 8px; border: 1px solid #d4d4d8;">
+          <!-- ATTENDANCE DISTRIBUTION GRAPH -->
+          <div style="display: flex; height: 9px; border-radius: 4px; background: #e4e4e7; overflow: hidden; width: 100%; margin-bottom: 4px;">
+            ${pFull > 0 ? `<div style="width: ${pFull}%; background: #16a34a;" title="Full Days"></div>` : ''}
+            ${pHalf > 0 ? `<div style="width: ${pHalf}%; background: #2563eb;" title="Half Days"></div>` : ''}
+            ${pHourly > 0 ? `<div style="width: ${pHourly}%; background: #9333ea;" title="Hourly"></div>` : ''}
+            ${pAbsent > 0 ? `<div style="width: ${pAbsent}%; background: #dc2626;" title="Absent"></div>` : ''}
+            ${pSick > 0 ? `<div style="width: ${pSick}%; background: #f59e0b;" title="Sick"></div>` : ''}
+            ${pEmergency > 0 ? `<div style="width: ${pEmergency}%; background: #ea580c;" title="Emergency"></div>` : ''}
           </div>
-          <div style="flex: 1; border: 1px solid #e4e4e7; border-radius: 6px; padding: 10px; text-align: center; background: #fafafa;">
-            <div style="font-size: 10px; font-weight: 800; color: #71717a; text-transform: uppercase;">Total Bale</div>
-            <div style="font-size: 20px; font-weight: 900; color: #b91c1c; margin-top: 2px;">₱${siteTotalBale.toLocaleString()}</div>
+          <div style="font-size: 9px; color: #52525b; display: flex; gap: 6px; flex-wrap: wrap;">
+            <span><strong style="color:#16a34a;">Full:</strong> ${fullCnt}</span>
+            <span><strong style="color:#2563eb;">Half:</strong> ${halfCnt}</span>
+            <span><strong style="color:#dc2626;">Abs:</strong> ${absentCnt}</span>
+            <span><strong style="color:#f59e0b;">Sick:</strong> ${sickCnt}</span>
           </div>
-          <div style="flex: 1; border: 1px solid #e4e4e7; border-radius: 6px; padding: 10px; text-align: center; background: #fafafa;">
-            <div style="font-size: 10px; font-weight: 800; color: #71717a; text-transform: uppercase;">Attendance Rate</div>
-            <div style="font-size: 20px; font-weight: 900; color: ${attendancePct >= 80 ? '#16a34a' : (attendancePct >= 50 ? '#2563eb' : '#dc2626')}; margin-top: 2px;">${attendancePct}%</div>
-          </div>
-        </div>
-
-        <!-- WORKER ANALYTICS & SHIFT BREAKDOWN TABLE -->
-        <table style="width: 100%; border-collapse: collapse; font-size: 11px; border: 1px solid #d4d4d8;">
-          <thead>
-            <tr style="background: #f4f4f5; border-bottom: 2px solid #a1a1aa;">
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: left; width: 220px;">WORKER NAME</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 85px;">ROLE</th>
-              ${dates.map(d => `
-                <th style="border: 1px solid #d4d4d8; padding: 6px 2px; text-align: center; min-width: 55px;">
-                  <div style="font-weight: 800; font-size: 10px; color: #18181b;">${d.dayNameShort || d.key}</div>
-                  <div style="font-weight: 700; font-size: 10px; color: #d11a2a;">${d.dayNum}</div>
-                </th>
-              `).join('')}
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 60px; background: #e4e4e7;">DAYS</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 60px; background: #e4e4e7;">OT</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: center; width: 85px; background: #e4e4e7;">RATE</th>
-              <th style="border: 1px solid #d4d4d8; padding: 8px; text-align: left; width: 180px;">REMARKS</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${workers.map(w => {
-              const m = getWorkerMetrics(w);
-              const workerAttPct = Math.min(100, Math.round((m.daysWorked / 6) * 100));
-              const pctColor = workerAttPct >= 80 ? '#16a34a' : (workerAttPct >= 50 ? '#2563eb' : '#dc2626');
-
-              return `
-                <tr style="border-bottom: 1px solid #e4e4e7;">
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 8px; font-weight: 800; text-transform: uppercase;">
-                    ${w.name}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-size: 10px; font-weight: 700; color: #52525b;">
-                    ${w.role}
-                  </td>
-                  ${dates.map(d => {
-                    const val = getWorkerAttendanceVal(w, d);
-                    const otVal = getWorkerOtVal(w, d);
-                    let badgeHtml = '<span style="color:#a1a1aa; font-weight:700;">-</span>';
-                    if (val === '1.0' || val === '1') {
-                      badgeHtml = '<span style="background: #198754; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Full</span>';
-                    } else if (val === '0.5') {
-                      badgeHtml = '<span style="background: #0d6efd; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Half</span>';
-                    } else if (String(val).endsWith('h')) {
-                      badgeHtml = `<span style="background: #6f42c1; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">${val}</span>`;
-                    } else if (val === 'absent') {
-                      badgeHtml = '<span style="background: #dc3545; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Abs</span>';
-                    } else if (val === 'sick') {
-                      badgeHtml = '<span style="background: #ffc107; color: #000; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Sick</span>';
-                    } else if (val === 'emergency') {
-                      badgeHtml = '<span style="background: #fd7e14; color: #fff; padding: 2px 5px; border-radius: 3px; font-weight: 800; font-size: 9px;">Emg</span>';
-                    }
-
-                    return `
-                      <td style="border: 1px solid #d4d4d8; padding: 4px 2px; text-align: center;">
-                        <div>${badgeHtml}</div>
-                        ${otVal > 0 ? `<div style="color:#d11a2a; font-weight:800; font-size:9px; margin-top:1px;">+${otVal}h</div>` : ''}
-                      </td>
-                    `;
-                  }).join('')}
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-weight: 800; background: #fafafa; font-size: 11px;">
-                    ${m.daysWorked.toFixed(1)}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-weight: 800; color: #d11a2a; background: #fafafa; font-size: 11px;">
-                    ${m.totalOT > 0 ? `${m.totalOT}h` : '-'}
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 4px; text-align: center; font-weight: 800; color: ${pctColor}; font-size: 11px;">
-                    ${workerAttPct}%
-                  </td>
-                  <td style="border: 1px solid #d4d4d8; padding: 7px 8px; font-size: 10px; color: #3f3f46;">
-                    ${(w.remarks || '-').replace(/</g, '&lt;')}
-                  </td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-
-        <!-- SITE SUPERVISOR REMARKS LOG -->
-        ${(locData.siteRemarksHistory && locData.siteRemarksHistory.length > 0) ? `
-          <div style="margin-top: 14px; padding: 10px 14px; background: #fdf2f2; border-left: 4px solid #d11a2a; border-radius: 4px;">
-            <div style="font-weight: 800; font-size: 11px; color: #991b1b; text-transform: uppercase; margin-bottom: 4px;">
-              Site Supervisor Remarks & Field Notes (${loc}):
-            </div>
-            ${locData.siteRemarksHistory.slice(-4).reverse().map(rem => `
-              <div style="font-size: 11px; color: #374151; margin-bottom: 3px;">
-                <strong>[${rem.dateStr || 'Note'}]:</strong> ${rem.text}
+        </td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 800; font-size: 12px; border: 1px solid #d4d4d8; background: #fafafa;">
+          ${m.daysWorked.toFixed(1)}
+        </td>
+        <td style="padding: 6px 4px; text-align: center; font-weight: 800; font-size: 12px; color: #d11a2a; border: 1px solid #d4d4d8; background: #fafafa;">
+          ${m.totalOT > 0 ? `${m.totalOT}h` : '-'}
+        </td>
+        <td style="padding: 6px 8px; border: 1px solid #d4d4d8; background: #fafafa;">
+          <!-- AUTOMATED SYSTEM REMARKS BADGES -->
+          <div style="display: flex; gap: 3px; flex-direction: column;">
+            ${autoRemarks.map(ar => `
+              <div style="font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: ${ar.bg || '#fef2f2'}; color: ${ar.color || '#991b1b'}; border: 1px solid ${ar.border || '#fecaca'}; display: inline-block;">
+                ${ar.text}
               </div>
             `).join('')}
           </div>
-        ` : ''}
-      </div>
-    `;
-  });
-
-  if (includeSignatures) {
-    html += `
-      <div style="display: flex; justify-content: space-between; margin-top: 35px; padding-top: 15px; border-top: 2px solid #e4e4e7;">
-        <div style="text-align: center; width: 30%;">
-          <div style="border-bottom: 1.5px solid #000; height: 35px;"></div>
-          <div style="font-weight: 800; font-size: 11px; margin-top: 5px;">PREPARED BY (TIMEKEEPER)</div>
-        </div>
-        <div style="text-align: center; width: 30%;">
-          <div style="border-bottom: 1.5px solid #000; height: 35px;"></div>
-          <div style="font-weight: 800; font-size: 11px; margin-top: 5px;">CHECKED BY (SITE ENGINEER)</div>
-        </div>
-        <div style="text-align: center; width: 30%;">
-          <div style="border-bottom: 1.5px solid #000; height: 35px;"></div>
-          <div style="font-weight: 800; font-size: 11px; margin-top: 5px;">APPROVED BY (PROJECT MANAGER)</div>
-        </div>
-      </div>
+        </td>
+        <td style="padding: 6px 8px; border: 1px solid #d4d4d8;">
+          <!-- WORKER FIELD NOTES -->
+          <div style="font-size: 10px; color: #18181b; font-weight: 600;">
+            ${(w.remarks || '-').replace(/</g, '&lt;')}
+          </div>
+          ${historyNotes ? `<div style="color: #71717a; font-size: 8.5px; margin-top: 3px;">Prev: ${historyNotes}</div>` : ''}
+        </td>
+      </tr>
     `;
   }
 
-  html += `</div>`;
-  return html;
+  function renderFooterElements() {
+    // Generate automated operational remarks summary across all evaluated workers
+    const perfectAttWorkers = [];
+    const heavyOtWorkers = [];
+    const highAbsenceWorkers = [];
+    const baleWorkers = [];
+
+    allSiteWorkers.forEach(item => {
+      const w = item.worker;
+      const m = getWorkerMetrics(w);
+      const autoNotes = getWorkerAutomatedRemarks(w, dates);
+      
+      if (m.daysWorked >= 6) perfectAttWorkers.push(w.name);
+      if (m.totalOT >= 8) heavyOtWorkers.push(`${w.name} (+${m.totalOT}h)`);
+      const hasAbsences = autoNotes.some(n => n.text.includes('Absent') || n.text.includes('Absences'));
+      if (hasAbsences) highAbsenceWorkers.push(w.name);
+      if ((w.baleValue || 0) > 0) baleWorkers.push(`${w.name} (₱${Number(w.baleValue).toLocaleString()})`);
+    });
+
+    const automatedSummaryHtml = `
+      <div style="margin-top: 14px; padding: 10px 14px; background: #fff5f5; border-left: 4px solid #d11a2a; border-radius: 4px; border-top: 1px solid #fecaca; border-right: 1px solid #fecaca; border-bottom: 1px solid #fecaca;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <div style="font-weight: 900; font-size: 11px; color: #991b1b; text-transform: uppercase;">
+            <span style="color: #d11a2a;">■</span> System Automated Remarks & Operational Highlights:
+          </div>
+          <div style="font-size: 9.5px; font-weight: 800; color: #71717a;">
+            ${allSiteWorkers.length} Workers Evaluated
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 9.5px; color: #1f2937;">
+          <div style="background: #ffffff; padding: 6px 8px; border-radius: 4px; border: 1px solid #fecaca;">
+            <strong style="color: #166534;">⭐ Perfect Attendance (${perfectAttWorkers.length}):</strong> 
+            <span>${perfectAttWorkers.length > 0 ? perfectAttWorkers.join(', ') : 'None this period'}</span>
+          </div>
+          <div style="background: #ffffff; padding: 6px 8px; border-radius: 4px; border: 1px solid #fecaca;">
+            <strong style="color: #9a3412;">🔥 Heavy Overtime (${heavyOtWorkers.length}):</strong> 
+            <span>${heavyOtWorkers.length > 0 ? heavyOtWorkers.join(', ') : 'None this period'}</span>
+          </div>
+          <div style="background: #ffffff; padding: 6px 8px; border-radius: 4px; border: 1px solid #fecaca;">
+            <strong style="color: #991b1b;">⚠️ Workers with Absences (${highAbsenceWorkers.length}):</strong> 
+            <span>${highAbsenceWorkers.length > 0 ? highAbsenceWorkers.join(', ') : 'None recorded'}</span>
+          </div>
+          <div style="background: #ffffff; padding: 6px 8px; border-radius: 4px; border: 1px solid #fecaca;">
+            <strong style="color: #1e40af;">💳 Active Bale Deductions (${baleWorkers.length}):</strong> 
+            <span>${baleWorkers.length > 0 ? baleWorkers.join(', ') : 'None'}</span>
+          </div>
+        </div>
+      </div>
+    `;
+
+    let siteRemarksHtml = '';
+    if (allSitesRemarks.length > 0) {
+      siteRemarksHtml = `
+        <div style="margin-top: 10px; padding: 10px 14px; background: #fdf2f2; border-left: 4px solid #d11a2a; border-radius: 4px;">
+          <div style="font-weight: 800; font-size: 11px; color: #991b1b; text-transform: uppercase; margin-bottom: 5px;">
+            Site Supervisor Daily Remarks & Field Logs:
+          </div>
+          ${allSitesRemarks.map(sr => `
+            <div style="margin-bottom: 4px; font-size: 10px;">
+              <span style="font-weight: 800; color: #18181b;">[${sr.loc}]:</span>
+              ${sr.remarks.slice(-3).reverse().map(rem => `<span style="color: #374151; margin-left: 4px;">&bull; <strong>${rem.dateStr || 'Log'}:</strong> ${rem.text}</span>`).join(' ')}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    const signaturesHtml = (includeSignatures ? `
+      <div style="display: flex; justify-content: space-between; margin-top: 26px; padding-top: 10px; border-top: 1.5px solid #e4e4e7;">
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 30px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">PREPARED BY (TIMEKEEPER)</div>
+        </div>
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 30px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">CHECKED BY (SITE ENGINEER)</div>
+        </div>
+        <div style="text-align: center; width: 30%;">
+          <div style="border-bottom: 1.5px solid #000; height: 30px;"></div>
+          <div style="font-weight: 800; font-size: 10px; margin-top: 4px;">APPROVED BY (PROJECT MANAGER)</div>
+        </div>
+      </div>
+    ` : '');
+
+    return {
+      tfootHtml: '',
+      signaturesHtml: automatedSummaryHtml + siteRemarksHtml + signaturesHtml
+    };
+  }
+
+  buildDynamicTableReport({
+    container: tempContainer,
+    items: allSiteWorkers,
+    renderPageSkeleton,
+    renderRowHtml,
+    renderFooterElements,
+    maxPageHeight: 740
+  });
 }
 
-async function generatePDF(actionType = 'download', isTimesheet = true, includeSignatures = true) {
+async function generatePDF(actionType = 'download', isTimesheet = true, includeSignatures = true, includeWorkerBale = true) {
   showProcessingIndicator(
     isTimesheet ? "Generating Timesheet PDF..." : "Generating Analytics PDF...",
     "Processing attendance records and computing page layout..."
@@ -4221,17 +4864,15 @@ async function generatePDF(actionType = 'download', isTimesheet = true, includeS
   tempContainer.style.top = '0';
   tempContainer.style.width = '1300px';
   tempContainer.style.background = '#ffffff';
+  document.body.appendChild(tempContainer);
 
   if (isTimesheet) {
-    tempContainer.innerHTML = buildCleanTimesheetHtml(sitesToProcess, dates, includeSignatures);
+    buildDynamicTimesheetPages(tempContainer, sitesToProcess, dates, includeSignatures, includeWorkerBale);
   } else {
-    tempContainer.innerHTML = buildCleanAnalyticsHtml(sitesToProcess, dates, includeSignatures);
+    buildDynamicAnalyticsPages(tempContainer, sitesToProcess, dates, includeSignatures);
   }
 
-  const fileName = isTimesheet 
-    ? `ARCDESIGN_Timesheet_${currentLocation}_${currentDate}.pdf`
-    : `ARCDESIGN_Analytics_${currentLocation}_${currentDate}.pdf`;
-
+  const fileName = getStandardExportFileName(isTimesheet ? "Timesheet" : "Analytics", "pdf");
   const title = isTimesheet ? "ARCDESIGN Timesheet PDF" : "ARCDESIGN Analytics & Remarks PDF";
   const message = `${isTimesheet ? 'Timesheet' : 'Analytics & Remarks'} statement for ${currentLocation} (${dateRangeStr})`;
 
@@ -4252,55 +4893,34 @@ async function processShareAction(targetChannel) {
     bootstrap.Modal.getInstance(modalEl)?.hide();
   }
 
-  const isCard = document.getElementById("shareFormatCardImg")?.checked ?? true;
-
   showProcessingIndicator(
-    isCard ? "Generating Timesheet Image..." : "Generating Timesheet HTML...",
-    "Preparing file for sharing..."
+    "Generating Timesheet Card...",
+    "Preparing image file for sharing..."
   );
 
   try {
-    if (isCard) {
-      // Generate snapshot card
-      const targetArea = document.getElementById("exportArea") || document.getElementById("mainTimesheetContainer");
-      if (!targetArea) return;
+    // Generate high-resolution snapshot card (scale 3.0 for crisp zoom)
+    const targetArea = document.getElementById("exportArea") || document.getElementById("mainTimesheetContainer");
+    if (!targetArea) return;
 
-      updateProcessingStatus("Capturing high-resolution card...", 60);
-      const canvas = await html2canvas(targetArea, { scale: 1.5, useCORS: true, logging: false });
-      const imgData = canvas.toDataURL('image/png');
-      const base64Data = imgData.split(',')[1];
-      const fileName = `ARCDESIGN_${currentLocation}_${currentDate}.png`;
+    updateProcessingStatus("Capturing ultra-high-resolution card...", 60);
+    const canvas = await html2canvas(targetArea, { scale: 3.0, useCORS: true, logging: false, backgroundColor: '#ffffff' });
+    const imgData = canvas.toDataURL('image/png');
+    const base64Data = imgData.split(',')[1];
+    const fileName = getStandardExportFileName("Card", "png");
 
-      updateProcessingStatus("Opening Share Sheet...", 95);
-      if (Android && Android.shareFile) {
-        Android.shareFile("ARCDESIGN Timesheet Card", `Attendance report for ${currentLocation}`, base64Data, fileName, "image/png", "");
-      } else if (navigator.share) {
-        const blob = await (await fetch(imgData)).blob();
-        const file = new File([blob], fileName, { type: 'image/png' });
-        await navigator.share({ files: [file], title: "ARCDESIGN Timesheet", text: `Attendance for ${currentLocation}` });
-      } else {
-        const a = document.createElement('a');
-        a.href = imgData;
-        a.download = fileName;
-        a.click();
-      }
+    updateProcessingStatus("Opening Share Sheet...", 95);
+    if (window.Android && window.Android.shareFile) {
+      window.Android.shareFile("ARCDESIGN Timesheet Card", `Attendance report for ${currentLocation}`, base64Data, fileName, "image/png", "");
+    } else if (navigator.share) {
+      const blob = await (await fetch(imgData)).blob();
+      const file = new File([blob], fileName, { type: 'image/png' });
+      await navigator.share({ files: [file], title: "ARCDESIGN Timesheet", text: `Attendance for ${currentLocation}` });
     } else {
-      // Share as standalone HTML transcript
-      updateProcessingStatus("Preparing HTML file...", 70);
-      const htmlContent = document.documentElement.outerHTML;
-      const base64Data = btoa(unescape(encodeURIComponent(htmlContent)));
-      const fileName = `ARCDESIGN_Timesheet_${currentLocation}_${currentDate}.html`;
-
-      updateProcessingStatus("Opening Share Sheet...", 95);
-      if (Android && Android.shareFile) {
-        Android.shareFile("ARCDESIGN App File", `Timesheet file for ${currentLocation}`, base64Data, fileName, "text/html", "");
-      } else {
-        const blob = new Blob([htmlContent], { type: 'text/html' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = fileName;
-        a.click();
-      }
+      const a = document.createElement('a');
+      a.href = imgData;
+      a.download = fileName;
+      a.click();
     }
   } catch (err) {
     console.error("Share error:", err);
@@ -4350,17 +4970,31 @@ function shareDirectQrLink() {
   }
 }
 
-// --- TXT EXPORT MODAL ---
+// --- TXT EXPORT MODAL & TRANSCRIPT GENERATOR ---
 function showExportTxtModal() {
   const startEl = document.getElementById("exportStartDate");
   const endEl = document.getElementById("exportEndDate");
   const dates = getCalculatedDates();
 
-  if (startEl && dates.length > 0) {
-    startEl.value = currentDate;
+  if (dates && dates.length > 0) {
+    if (startEl) startEl.value = dates[0].key;
+    if (endEl) endEl.value = dates[dates.length - 1].key;
+  } else {
+    if (startEl) startEl.value = currentDate;
+    if (endEl) endEl.value = currentDate;
   }
-  if (endEl && dates.length > 0) {
-    endEl.value = currentDate;
+
+  const siteLabelEl = document.getElementById("txtExportCurrentSiteLabel");
+  if (siteLabelEl) {
+    siteLabelEl.innerText = currentLocation === "VIEW_ALL" ? "All Sites" : currentLocation;
+  }
+
+  const radioCurrent = document.getElementById("txtExportScopeCurrent");
+  const radioAll = document.getElementById("txtExportScopeAll");
+  if (currentLocation === "VIEW_ALL") {
+    if (radioAll) radioAll.checked = true;
+  } else {
+    if (radioCurrent) radioCurrent.checked = true;
   }
 
   const modalEl = document.getElementById("exportTxtModal");
@@ -4369,61 +5003,162 @@ function showExportTxtModal() {
   }
 }
 
-function executeTxtExport() {
-  const dates = getCalculatedDates();
-  const dateRangeStr = (dates.length > 0) ? `${dates[0].monthStr} ${dates[0].dayNum} - ${dates[dates.length - 1].monthStr} ${dates[dates.length - 1].dayNum}` : currentDate;
+function getTranscriptDates(startVal, endVal) {
+  if (startVal && endVal) {
+    const sDate = new Date(startVal + "T00:00:00");
+    const eDate = new Date(endVal + "T00:00:00");
+    if (!isNaN(sDate.getTime()) && !isNaN(eDate.getTime()) && sDate <= eDate) {
+      const datesArr = [];
+      let cur = new Date(sDate);
+      const diffDays = Math.round((eDate - sDate) / (1000 * 60 * 60 * 24));
+      const count = Math.min(diffDays + 1, 31);
+      const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+      for (let i = 0; i < count; i++) {
+        const y = cur.getFullYear();
+        const m = String(cur.getMonth() + 1).padStart(2, '0');
+        const d = String(cur.getDate()).padStart(2, '0');
+        const dayKey = `${y}-${m}-${d}`;
+        const dayNum = String(cur.getDate()).padStart(2, '0');
+        datesArr.push({
+          key: dayKey,
+          dayName: dayNames[cur.getDay()],
+          dayNum: dayNum,
+          monthStr: monthNames[cur.getMonth()]
+        });
+        cur.setDate(cur.getDate() + 1);
+      }
+      return datesArr;
+    }
+  }
+  return getCalculatedDates();
+}
+
+function generateTranscriptText(options = {}) {
+  const startEl = document.getElementById("exportStartDate");
+  const endEl = document.getElementById("exportEndDate");
+  const startVal = options.startDate || (startEl ? startEl.value : null);
+  const endVal = options.endDate || (endEl ? endEl.value : null);
+  const dates = getTranscriptDates(startVal, endVal);
+
+  const scopeRadioAll = document.getElementById("txtExportScopeAll");
+  const isAllSelected = options.scope ? (options.scope === "ALL") : (scopeRadioAll ? scopeRadioAll.checked : (currentLocation === "VIEW_ALL"));
+  const scope = isAllSelected ? "ALL" : "CURRENT";
+
+  const includeSiteRemarks = options.includeSiteRemarks !== undefined 
+    ? options.includeSiteRemarks 
+    : (document.getElementById("txtIncludeSiteRemarks") ? document.getElementById("txtIncludeSiteRemarks").checked : true);
+  const includeWorkerRemarks = options.includeWorkerRemarks !== undefined 
+    ? options.includeWorkerRemarks 
+    : (document.getElementById("txtIncludeWorkerRemarks") ? document.getElementById("txtIncludeWorkerRemarks").checked : true);
+  const includeAutomatedRemarks = options.includeAutomatedRemarks !== undefined 
+    ? options.includeAutomatedRemarks 
+    : (document.getElementById("txtIncludeAutomatedRemarks") ? document.getElementById("txtIncludeAutomatedRemarks").checked : true);
+
+  const dateRangeStr = getPeriodString(dates);
+  const genDateStr = `${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}, ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`;
+
+  const delSites = getDeletedSites();
+  const allActiveSites = Object.keys(currentActiveData.locations || {}).filter(s => !delSites.includes(s.toUpperCase()));
+  let sitesToRender = [];
+  if (scope === "ALL" || currentLocation === "VIEW_ALL") {
+    sitesToRender = allActiveSites;
+  } else {
+    sitesToRender = [currentLocation];
+  }
+
+  const headerLoc = (scope === "ALL" || currentLocation === "VIEW_ALL") ? "ALL SITES" : currentLocation;
 
   let txt = `====================================================\n`;
   txt += `ARCDESIGN CONSTRUCTION SERVICES\n`;
   txt += `OFFICIAL TIMESHEET & ATTENDANCE TRANSCRIPT\n`;
+  txt += `SCOPE: ${headerLoc}\n`;
   txt += `PERIOD: ${dateRangeStr}\n`;
-  txt += `SITE: ${currentLocation}\n`;
-  txt += `GENERATED: ${new Date().toLocaleString()}\n`;
+  txt += `GENERATED: ${genDateStr}\n`;
   txt += `====================================================\n\n`;
-
-  const delSites = getDeletedSites();
-  let sitesToRender = (currentLocation === "VIEW_ALL") 
-    ? Object.keys(currentActiveData.locations || {}).filter(s => !delSites.includes(s.toUpperCase()))
-    : [currentLocation];
 
   sitesToRender.forEach(loc => {
     const locData = currentActiveData.locations[loc];
     if (!locData) return;
 
     txt += `[SITE: ${loc}]\n`;
-    txt += `Project Bale: ₱${locData.baleValue || 0}\n`;
+    const isBaleOn = locData.isBaleEnabled !== false;
+    txt += `Project Bale: ₱${(locData.baleValue || 0).toLocaleString()} (${isBaleOn ? 'ON / Active' : 'OFF / Excluded'})\n`;
     txt += `Status: ${locData.isDone ? 'COMPLETED' : 'IN PROGRESS'}\n`;
-    if (locData.remarks) {
-      txt += `Site Notes: ${locData.remarks}\n`;
+
+    // Site notes and supervisor remarks
+    if (includeSiteRemarks) {
+      if (locData.remarks && locData.remarks.trim()) {
+        txt += `Site Notes: ${locData.remarks.trim()}\n`;
+      }
+      if (locData.siteRemarksHistory && locData.siteRemarksHistory.length > 0) {
+        txt += `Site Supervisor Daily Field Logs:\n`;
+        locData.siteRemarksHistory.slice(-5).reverse().forEach(log => {
+          txt += `  * [${log.dateStr || 'Log'}]: ${log.text}\n`;
+        });
+      }
     }
     txt += `----------------------------------------------------\n`;
 
-    const workers = locData.workers || [];
+    let workers = locData.workers || [];
+    if (selectedRolesFilter.length > 0) {
+      workers = workers.filter(w => selectedRolesFilter.includes(w.role));
+    }
+
+    if (workers.length === 0) {
+      txt += `No workers recorded for this site.\n\n`;
+      return;
+    }
+
     workers.forEach(w => {
       const m = getWorkerMetrics(w);
-      const att = dates.map(d => `${d.key}: ${(w.attendance && w.attendance[d.key]) || '-'}`).join(' | ');
-      const ot = dates.map(d => `${d.key}: ${(w.ot && w.ot[d.key]) || 0}h`).join(' | ');
+      const att = dates.map(d => `${d.dayName} ${d.dayNum}: ${(w.attendance && w.attendance[d.key]) || '-'}`).join(' | ');
+      const ot = dates.map(d => `${d.dayName} ${d.dayNum}: ${(w.ot && w.ot[d.key]) || 0}h`).join(' | ');
 
-      txt += `Worker: ${w.name} (${w.role})\n`;
+      txt += `Worker: ${w.name} [Role: ${w.role}]\n`;
       txt += `  Attendance: [ ${att} ]\n`;
-      txt += `  Overtime:   [ ${ot} ]\n`;
-      txt += `  Days: ${m.daysWorked.toFixed(1)} | Hourly: ${m.hourlyHours}h | OT: ${m.totalOT}h | Bale: ₱${w.baleValue || 0}\n`;
-      if (w.remarks) {
-        txt += `  Remarks: ${w.remarks}\n`;
+      if (m.totalOT > 0) {
+        txt += `  Overtime:   [ ${ot} ]\n`;
       }
-      if (w.notesHistory && w.notesHistory.length > 0) {
-        txt += `  Notes: ${w.notesHistory.map(n => n.text).join('; ')}\n`;
+      txt += `  Summary: Days Worked: ${m.daysWorked.toFixed(1)} | Overtime: ${m.totalOT}h | Bale: ₱${Number(w.baleValue || 0).toLocaleString()}\n`;
+
+      // Worker notes and remarks
+      if (includeWorkerRemarks) {
+        if (w.remarks && w.remarks.trim()) {
+          txt += `  Worker Remarks: ${w.remarks.trim()}\n`;
+        }
+        if (w.notesHistory && w.notesHistory.length > 0) {
+          const notesStr = w.notesHistory.map(n => n.text).join('; ');
+          txt += `  Worker Field Notes History: ${notesStr}\n`;
+        }
       }
+
+      // Automated remarks
+      if (includeAutomatedRemarks) {
+        const autoRemarks = getWorkerAutomatedRemarks(w, dates);
+        if (autoRemarks && autoRemarks.length > 0) {
+          txt += `  Automated Remarks: ${autoRemarks.map(ar => ar.text).join(' | ')}\n`;
+        }
+      }
+
       txt += `\n`;
     });
+
     txt += `\n`;
   });
 
-  const fileName = `ARCDESIGN_Timesheet_${currentLocation}_${currentDate}.txt`;
+  return { txt, scope, dates, headerLoc };
+}
+
+function executeTxtExport() {
+  const { txt, scope, dates, headerLoc } = generateTranscriptText();
+  const targetLocName = (scope === "ALL" || currentLocation === "VIEW_ALL") ? "All Sites" : currentLocation;
+  const fileName = getStandardExportFileName("Transcript", "txt", targetLocName, dates);
   const base64Data = btoa(unescape(encodeURIComponent(txt)));
 
-  if (Android && Android.shareFile) {
-    Android.shareFile("ARCDESIGN Timesheet Transcript", `Text export for ${currentLocation}`, base64Data, fileName, "text/plain", "");
+  if (window.Android && window.Android.shareFile) {
+    window.Android.shareFile("ARCDESIGN Timesheet Transcript", `Text export for ${targetLocName}`, base64Data, fileName, "text/plain", "");
   } else if (navigator.share) {
     const blob = new Blob([txt], { type: 'text/plain' });
     const file = new File([blob], fileName, { type: 'text/plain' });
@@ -4442,36 +5177,10 @@ function executeTxtExport() {
 }
 
 function copyTranscriptToClipboard() {
-  const dates = getCalculatedDates();
-  const dateRangeStr = (dates.length > 0) ? (dates[0].monthStr + " " + dates[0].dayNum + " - " + dates[dates.length - 1].monthStr + " " + dates[dates.length - 1].dayNum) : currentDate;
-
-  let txt = "====================================================\n";
-  txt += "ARCDESIGN CONSTRUCTION SERVICES\n";
-  txt += "ATTENDANCE & TIMESHEET TRANSCRIPT\n";
-  txt += "PERIOD: " + dateRangeStr + "\n";
-  txt += "LOCATION: " + currentLocation + "\n";
-  txt += "====================================================\n\n";
-
-  const delSites = getDeletedSites();
-  let sitesToRender = (currentLocation === "VIEW_ALL") 
-    ? Object.keys(currentActiveData.locations || {}).filter(s => !delSites.includes(s.toUpperCase()))
-    : [currentLocation];
-
-  sitesToRender.forEach(loc => {
-    const locData = currentActiveData.locations[loc];
-    if (!locData) return;
-    txt += "--- SITE: " + loc + " ---\n";
-    (locData.workers || []).forEach(w => {
-      const m = getWorkerMetrics(w);
-      const att = dates.map(d => d.key + ": " + ((w.attendance && w.attendance[d.key]) || "-")).join(" | ");
-      txt += w.name + " (" + w.role + "): [" + att + "] | Days: " + m.daysWorked.toFixed(1) + " | OT: " + m.totalOT + "h | Bale: ₱" + (w.baleValue || 0) + "\n";
-    });
-    txt += "\n";
-  });
-
+  const { txt } = generateTranscriptText();
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(txt).then(() => {
-      alert("Timesheet details successfully copied to clipboard!");
+      alert("Timesheet details & transcript successfully copied to clipboard!");
     }).catch(() => {
       executeTxtExport();
     });
@@ -4543,11 +5252,6 @@ function executeClearRecords() {
 }
 
 function promptDeleteRecordedDate(targetDateKey, targetLabel) {
-  if (!isAdmin()) {
-    alert("Administrator authorization required to delete recorded periods.");
-    return;
-  }
-
   targetDatePendingDeletion = targetDateKey || currentDate;
   currentDeleteDateMath = generateMathChallenge();
 
@@ -4648,6 +5352,10 @@ function promptDeleteSite(loc) {
 }
 
 function executeDeleteProject() {
+  if (!isAdmin()) {
+    alert("Administrator authorization required to delete project sites.");
+    return;
+  }
   const ansEl = document.getElementById("deleteMathAnswerInput");
   const errEl = document.getElementById("deleteMathErrorAlert");
   const val = parseInt(ansEl?.value, 10);
@@ -4837,6 +5545,9 @@ window.updateAttendance = updateAttendance;
 window.updateOT = updateOT;
 window.updateWorkerBale = updateWorkerBale;
 window.updateLocationBale = updateLocationBale;
+window.updateLocationBaleForSite = updateLocationBaleForSite;
+window.toggleLocationBaleEnabled = toggleLocationBaleEnabled;
+window.generateTranscriptText = generateTranscriptText;
 window.toggleStatsView = toggleStatsView;
 window.openFocusCustomHours = openFocusCustomHours;
 window.updateFocusWorkerRemarks = updateFocusWorkerRemarks;

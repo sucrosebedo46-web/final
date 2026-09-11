@@ -686,6 +686,56 @@
               </tfoot>
             </table>
           </div>
+
+          <!-- PROJECT BALE DEDUCTION & GRAND TOTAL CARD -->
+          <div class="card p-3 bg-light border border-2 border-danger shadow-sm mt-3" id="payrollBaleSummaryCard">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2 pb-2 border-bottom">
+              <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-danger fs-6"><i class="bi bi-cash-coin me-1"></i>PAYROLL TOTALS</span>
+                <span class="fw-bold text-dark small text-uppercase">Site Bale Deduction & Final Total</span>
+              </div>
+              <!-- AT THE BOTTOM TOGGLE ON/OFF FOR PROJECT BALE -->
+              <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+                <input class="form-check-input border-danger" type="checkbox" id="payrollProjectBaleToggle" checked onchange="toggleProjectBaleDeduction(this.checked)" style="cursor: pointer; transform: scale(1.15);">
+                <label class="form-check-label fw-bold text-dark user-select-none cursor-pointer small" for="payrollProjectBaleToggle">
+                  Project Bale: <span id="payrollProjectBaleToggleBadge" class="badge bg-success">ON (Deducted)</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="row g-2 justify-content-end align-items-center text-dark">
+              <!-- TOTAL AMOUNT -->
+              <div class="col-12 col-sm-4">
+                <div class="p-2 bg-white rounded border text-end shadow-2xs">
+                  <span class="small text-muted fw-bold text-uppercase d-block" style="font-size: 0.72rem;">TOTAL AMOUNT</span>
+                  <span class="fs-5 fw-bold text-dark" id="payrollCardTotalAmount">₱0.00</span>
+                  <small class="text-muted d-block" style="font-size: 0.68rem;">Gross Worker Earnings</small>
+                </div>
+              </div>
+              <!-- BALE AMOUNT (DEDUCTED, SITE BALE OR MANUALLY INPUTTED) -->
+              <div class="col-12 col-sm-4">
+                <div class="p-2 bg-white rounded border border-danger text-end shadow-2xs">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="small text-danger fw-bold text-uppercase" style="font-size: 0.72rem;">BALE AMOUNT</span>
+                    <span class="badge bg-light text-muted border" style="font-size: 0.62rem;" id="payrollBaleModeBadge">SITE BALE / MANUAL</span>
+                  </div>
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text fw-bold text-danger bg-light">₱</span>
+                    <input type="number" step="any" id="payrollProjectBaleInput" class="form-control fw-bold text-end text-danger" placeholder="0.00" value="0" oninput="onPayrollManualBaleInput(this.value)">
+                  </div>
+                  <small class="text-danger d-block mt-1 fw-semibold" style="font-size: 0.68rem;" id="payrollBaleDeductionLabel">Deducted from Total Amount</small>
+                </div>
+              </div>
+              <!-- FINAL TOTAL -->
+              <div class="col-12 col-sm-4">
+                <div class="p-2 bg-dark text-white rounded border border-danger text-end shadow-sm">
+                  <span class="small text-warning fw-bold text-uppercase d-block" style="font-size: 0.72rem;">TOTAL</span>
+                  <span class="fs-4 fw-bold text-white" id="payrollCardFinalTotal">₱0.00</span>
+                  <small class="text-white-50 d-block" style="font-size: 0.68rem;">Net Disbursement (Total - Bale)</small>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="modal-footer bg-white py-2 px-3 d-flex justify-content-between">
@@ -1050,7 +1100,10 @@
       </div> 
       <div class="modal-body p-3 bg-light text-dark"> 
         <div class="alert alert-info py-2 small mb-3"> 
-          Staff accounts can record attendance, overtime, custom hours, remarks, bales, and export records, but <strong>cannot create sites, delete sites, add workers, edit worker roles/names, or delete workers/dates</strong>. 
+          <strong>Staff Account Permissions & Synchronization:</strong><br>
+          <span class="text-success fw-bold">✓ Full Access:</span> Modify attendances, custom hours, overtime, payrates, focus mode, all export functions, notes & remarks, site bale values, delete recorded dates, and clear site records.<br>
+          <span class="text-danger fw-bold">✕ Restrictions:</span> Staff cannot add sites, delete sites, add workers, rename workers, or change worker roles.<br>
+          <small class="text-muted"><i class="bi bi-arrow-repeat me-1"></i>All actions and modifications automatically reflect and synchronize in real-time between Admin and Staff accounts.</small>
         </div> 
         <div id="createAccountAlert" class="alert alert-danger py-2 small d-none"></div> 
         <div class="mb-3"> 
@@ -1195,25 +1248,79 @@
 
 <!-- EXPORT TXT MODAL --> 
 <div class="modal fade" id="exportTxtModal" tabindex="-1" aria-hidden="true"> 
-  <div class="modal-dialog modal-dialog-centered border-danger"> 
+  <div class="modal-dialog modal-dialog-centered border-danger" style="max-width: 440px;"> 
     <div class="modal-content border-danger border-2 shadow-lg"> 
       <div class="modal-header bg-dark text-white border-bottom border-danger py-2 px-3"> 
         <h6 class="modal-title fw-bold mb-0"><i class="bi bi-file-earmark-text-fill text-danger me-2"></i>Export Records Transcript (.TXT)</h6> 
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button> 
       </div> 
       <div class="modal-body p-3 bg-light text-dark"> 
-        <div class="mb-3"> 
-          <label class="form-label fw-bold small">Select Period Start Date:</label> 
-          <input type="date" id="exportStartDate" class="form-control form-control-sm"> 
-        </div> 
-        <div class="mb-3"> 
-          <label class="form-label fw-bold small">Select Period End Date:</label> 
-          <input type="date" id="exportEndDate" class="form-control form-control-sm"> 
-        </div> 
+        <!-- SCOPE SELECTION: CURRENT SITE VS ALL SITES -->
+        <div class="mb-3">
+          <label class="form-label fw-bold small text-dark mb-1">Select Export Scope:</label>
+          <div class="d-flex gap-2">
+            <div class="form-check flex-fill p-2 bg-white rounded border">
+              <input class="form-check-input ms-0 me-2" type="radio" name="txtExportScope" id="txtExportScopeCurrent" value="CURRENT" checked>
+              <label class="form-check-label small fw-bold text-dark user-select-none" for="txtExportScopeCurrent">
+                Current Site (<span id="txtExportCurrentSiteLabel">Current</span>)
+              </label>
+            </div>
+            <div class="form-check flex-fill p-2 bg-white rounded border">
+              <input class="form-check-input ms-0 me-2" type="radio" name="txtExportScope" id="txtExportScopeAll" value="ALL">
+              <label class="form-check-label small fw-bold text-dark user-select-none" for="txtExportScopeAll">
+                All Active Sites
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- DATE RANGE -->
+        <div class="row g-2 mb-3">
+          <div class="col-6"> 
+            <label class="form-label fw-bold small text-muted mb-1">Period Start Date:</label> 
+            <input type="date" id="exportStartDate" class="form-control form-control-sm"> 
+          </div> 
+          <div class="col-6"> 
+            <label class="form-label fw-bold small text-muted mb-1">Period End Date:</label> 
+            <input type="date" id="exportEndDate" class="form-control form-control-sm"> 
+          </div> 
+        </div>
+
+        <!-- INCLUDE NOTES & REMARKS OPTIONS -->
+        <div class="p-2 bg-white rounded border mb-1">
+          <label class="form-label fw-bold small text-danger text-uppercase mb-2 d-block" style="font-size: 0.72rem; letter-spacing: 0.5px;">
+            <i class="bi bi-chat-left-text-fill me-1"></i>Notes & Remarks Options:
+          </label>
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="txtIncludeSiteRemarks" checked>
+            <label class="form-check-label small fw-semibold user-select-none" for="txtIncludeSiteRemarks">
+              Include Site Notes & Supervisor Daily Logs
+            </label>
+          </div>
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="txtIncludeWorkerRemarks" checked>
+            <label class="form-check-label small fw-semibold user-select-none" for="txtIncludeWorkerRemarks">
+              Include Worker Notes & Remarks
+            </label>
+          </div>
+          <div class="form-check form-switch mb-1">
+            <input class="form-check-input" type="checkbox" id="txtIncludeAutomatedRemarks" checked>
+            <label class="form-check-label small fw-semibold user-select-none" for="txtIncludeAutomatedRemarks">
+              Include Automated Remarks & Performance Flags
+            </label>
+          </div>
+        </div>
       </div> 
-      <div class="modal-footer bg-white py-2 px-3"> 
-        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button> 
-        <button type="button" class="btn btn-danger btn-sm fw-bold px-3" onclick="executeTxtExport()">Download Transcript</button> 
+      <div class="modal-footer bg-white py-2 px-3 d-flex justify-content-between"> 
+        <button type="button" class="btn btn-outline-secondary btn-sm fw-bold" onclick="copyTranscriptToClipboard()">
+          <i class="bi bi-clipboard-check me-1"></i>Copy Text
+        </button> 
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button> 
+          <button type="button" class="btn btn-danger btn-sm fw-bold px-3" onclick="executeTxtExport()">
+            <i class="bi bi-download me-1"></i>Download Transcript
+          </button> 
+        </div>
       </div> 
     </div> 
   </div> 
@@ -1251,13 +1358,23 @@
           </div> 
         </div> 
 
-        <div class="card p-2 bg-white border mb-3"> 
+        <div class="card p-2 bg-white border mb-2"> 
           <div class="form-check form-switch mb-0"> 
             <input class="form-check-input border-danger" type="checkbox" id="pdfIncludeSignaturesCheck"> 
-            <label class="form-check-label fw-bold small text-dark user-select-none" for="pdfIncludeSignaturesCheck"> 
+            <label class="form-check-label fw-bold small text-dark user-select-none cursor-pointer" for="pdfIncludeSignaturesCheck"> 
               Include Prepared by & Checked by Signatures 
             </label> 
           </div> 
+        </div> 
+
+        <div class="card p-2 bg-white border mb-3"> 
+          <div class="form-check form-switch mb-0"> 
+            <input class="form-check-input border-danger" type="checkbox" id="pdfIncludeWorkerBaleCheck" checked> 
+            <label class="form-check-label fw-bold small text-dark user-select-none cursor-pointer" for="pdfIncludeWorkerBaleCheck"> 
+              Include Worker Bale Column (Timesheet)
+            </label> 
+          </div> 
+          <div class="text-muted ms-4" style="font-size: 0.72rem;">Uncheck to exclude worker bale column if only site has bale.</div>
         </div> 
 
         <label class="fw-bold small text-dark mb-2 d-block"> 
@@ -1290,32 +1407,20 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button> 
       </div> 
       <div class="modal-body p-3 bg-light text-dark"> 
-        <label class="fw-bold small text-dark mb-2 d-block"> 
-          <i class="bi bi-ui-radios-grid text-danger me-1"></i>Choose What to Share: 
-        </label> 
-        <div class="d-flex flex-column gap-2 mb-3"> 
-          <div class="p-2 border rounded bg-white form-check border-danger"> 
-            <input class="form-check-input ms-1 me-2 border-danger" type="radio" name="arcShareFormatChoice" id="shareFormatCardImg" value="card_image" checked> 
-            <label class="form-check-label fw-bold small text-dark cursor-pointer user-select-none" for="shareFormatCardImg"> 
-              <i class="bi bi-image-fill text-danger me-1"></i>ArcDesign Profile Card (.png Image)
-            </label> 
-            <div class="text-muted ms-4" style="font-size: 0.72rem;"> 
-              High-definition image with contact details, services & estimates. Ready for Messenger & Social Media.
-            </div> 
-            <button type="button" class="btn btn-outline-danger btn-sm py-0 px-2 mt-1 ms-4 fw-bold" style="font-size: 0.72rem;" onclick="openArcCompanyProfileCard()">
-              <i class="bi bi-eye-fill me-1"></i>Preview Profile Card
-            </button>
+        <div class="p-3 border rounded bg-white border-danger shadow-sm mb-3"> 
+          <input type="hidden" id="shareFormatCardImg" value="card_image"> 
+          <div class="d-flex align-items-center justify-content-between mb-1"> 
+            <span class="fw-bold small text-dark"> 
+              <i class="bi bi-image-fill text-danger me-1"></i>ArcDesign Profile Card (.png Image) 
+            </span> 
+            <span class="badge bg-danger">HD PNG</span> 
           </div> 
-
-          <div class="p-2 border rounded bg-white form-check"> 
-            <input class="form-check-input ms-1 me-2 border-secondary" type="radio" name="arcShareFormatChoice" id="shareFormatHtml" value="html"> 
-            <label class="form-check-label fw-bold small text-dark cursor-pointer user-select-none" for="shareFormatHtml"> 
-              <i class="bi bi-filetype-html text-dark me-1"></i>Full Timesheet App (.html File)
-            </label> 
-            <div class="text-muted ms-4" style="font-size: 0.72rem;"> 
-              Complete application file ready to run on any mobile phone or browser. 
-            </div> 
+          <div class="text-muted small mb-2" style="font-size: 0.75rem;"> 
+            High-definition snapshot image with contact details, services & estimates. Ready for Messenger, Bluetooth & Social Media. 
           </div> 
+          <button type="button" class="btn btn-outline-danger btn-sm py-1 px-3 fw-bold" style="font-size: 0.75rem;" onclick="openArcCompanyProfileCard()"> 
+            <i class="bi bi-eye-fill me-1"></i>Preview Profile Card 
+          </button> 
         </div> 
 
         <!-- QUICK QR CODE BUTTON & BAR -->
